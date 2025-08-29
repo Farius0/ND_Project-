@@ -1,6 +1,6 @@
 # Algorithms
 
-This directory contains **high-level image processing algorithms** built on top of the project’s operator core and filters.  
+This directory contains **image processing algorithms** built on top of the project’s operator core and filters.  
 They implement classical diffusion models with ND-support and dual backend (NumPy / PyTorch).
 
 ## Files
