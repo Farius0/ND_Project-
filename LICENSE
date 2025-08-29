@@ -10,8 +10,6 @@ The following directories are released under the MIT License:
 - 07_SRC/degradations/  
 - 07_SRC/datasets/ 
 - 07_SRC/tests/    
-- 07_SRC/scripts/  
-- 07_SRC/logs/  
 
 MIT License
 
@@ -38,7 +36,9 @@ SOFTWARE.
 ## Proprietary Components
 
 The following directories are **proprietary** and may not be copied, modified, or redistributed without explicit written permission from the author: 
-- 07_SRC/filters/artifact_cleaning
+- 07_SRC/scripts/  
+- 07_SRC/logs/  
+- 07_SRC/results/
 
 **All rights reserved for these components.**
 
