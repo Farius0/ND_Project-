@@ -97,8 +97,8 @@ pytest -q
 
 This project uses a **dual-license model**:
 
-- **MIT License** for generic and reusable components (`core/`, `utils/`, `operators/`, `filters/`).  
-- **Proprietary License** for research-specific parts (`algorithms/`, `datasets/`, `scripts/`, `results/`, `logs/`).  
+- **MIT License** for generic and reusable components (`core/`, `utils/`, `operators/`, `filters/`, `algorithms/`, `datasets/`).  
+- **Proprietary License** for research-specific parts (`scripts/`, `results/`, `logs/`).  
 
 See the [`LICENSE`](LICENSE) file for details.
 
