@@ -1,0 +1,21 @@
+bilinear: true
+dropouts:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+feature_channels:
+- 16
+- 32
+- 64
+- 128
+- 256
+glca_levels:
+- 1
+- 2
+- 3
+in_channels: 1
+out_channels: 4
+use_fusion: true
+use_glca: true

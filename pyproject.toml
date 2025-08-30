@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nd_project"
+version = "0.1.0"
+description = "ND image analysis and segmentation framework"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "07_SRC"}
+
+[tool.setuptools.packages.find]
+where = ["07_SRC"]
+include = ["*"]
+exclude = ["03_EXAMPLES_DATA*",]
