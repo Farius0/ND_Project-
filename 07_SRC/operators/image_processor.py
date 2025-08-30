@@ -24,8 +24,41 @@ Framework = Literal["numpy", "torch"]
 # ==================================================
 def is_scalar_value(x) -> bool:
     """
-    Return True if x is a scalar (Python scalar, 0-d array/tensor, or scalars
-    inside a list/tuple), False otherwise.
+    Determine whether the input is a scalar or contains only scalar values.
+
+    Supports native Python scalars, NumPy scalars, 0-dimensional arrays/tensors,
+    and recursively checks lists/tuples of scalars.
+
+    Parameters
+    ----------
+    x : Any
+        Input object to test.
+
+    Returns
+    -------
+    bool
+        True if `x` is a scalar value or a container of scalars; False otherwise.
+
+    Examples
+    --------
+    >>> is_scalar_value(3.14)
+    True
+    >>> is_scalar_value(np.array(5))
+    True
+    >>> is_scalar_value(torch.tensor(7.))
+    True
+    >>> is_scalar_value([1, 2, 3])
+    True
+    >>> is_scalar_value(np.array([1, 2, 3]))
+    False
+    >>> is_scalar_value("hello")
+    False
+
+    Notes
+    -----
+    - For NumPy or Torch arrays, only 0-dimensional or shape (1,) arrays are accepted as scalars.
+    - Lists or tuples must contain only scalar values to return True.
+    - Strings and structured types are not considered scalars.
     """
     if isinstance(x, (int, float, complex, np.generic)):
         return True
@@ -40,35 +73,42 @@ def is_scalar_value(x) -> bool:
 # ==================================================
 class ImageProcessor(OperatorCore):
     """
-    Multi-strategy image processor (torch / vectorized / classic / parallel).
+    Multi-strategy ND-compatible image processor with backend awareness.
+
+    Inherits from OperatorCore and supports configurable processing pipelines
+    with automatic format preservation, layout tracking, and batch-wise handling.
 
     Notes
     -----
     - Dual-backend: NumPy in → NumPy out; Torch in → Torch out.
-    - ND-ready: channel/batch aware; slice/batch processing supported.
-    - Tag-preserving: AxisTracker metadata propagated to outputs.
+    - ND-ready: handles channel and batch axes via layout tagging.
+    - Flexible: supports function injection, vectorized ops, parallel loops, and Torch-native ops.
+    - Tag-preserving: all outputs inherit AxisTracker metadata for traceability.
+    - Input validation, shape preservation, and layout conversion are automatic.
     """
 
     # ====[ INIT ]====
     def __init__(
         self,
-        *,
         img_process_cfg: ImageProcessorConfig = ImageProcessorConfig(),
         layout_cfg: LayoutConfig = LayoutConfig(),
         global_cfg: GlobalConfig = GlobalConfig(),
         **kwargs: Any,
     ) -> None:
         """
-        Initialize image processor with strategy and layout/global configs.
+        Initialize the image processor with layout, backend, and strategy configuration.
 
         Parameters
         ----------
         img_process_cfg : ImageProcessorConfig
-            Processing strategy, function handle, and IO options.
+            Defines the processing function, strategy ('auto', 'vectorized', 'torch', etc.),
+            and various I/O behavior flags (e.g., return_tuple, fallback).
         layout_cfg : LayoutConfig
-            Axis roles and preferred layout.
+            Provides axis roles (channel, batch, feature) and layout expectations.
         global_cfg : GlobalConfig
-            Backend, device, normalization and verbosity flags.
+            Controls framework, output format, device, verbosity, and backend preferences.
+        kwargs : dict
+            Additional keyword arguments passed to the OperatorCore base class.
         """
         # --- Config mirrors ---
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -123,17 +163,36 @@ class ImageProcessor(OperatorCore):
     # ====[ CALLABLE ENTRY POINT ]====
     def __call__(self, *images: ArrayLike) -> ArrayLike:
         """
-        Apply the configured function to one or more images.
+        Apply the configured processing function to one or more ND images.
+
+        Supports automatic dispatch based on processing strategy and layout-aware
+        handling of batches, channels, and features. Preserves AxisTracker tags
+        and backend compatibility.
 
         Parameters
         ----------
-        images : ndarray | Tensor
-            One or more images to process (same shape).
+        images : np.ndarray or torch.Tensor
+            One or more input images. All must have the same shape.
 
         Returns
         -------
-        ndarray | Tensor
-            Processed output in the desired format; tags preserved.
+        np.ndarray or torch.Tensor
+            Processed image (or batch), with same shape and backend as inputs.
+            Tags are preserved and updated if applicable.
+
+        Raises
+        ------
+        ValueError
+            If no image is provided or if shapes are inconsistent.
+        TypeError
+            If no callable processing function is configured.
+
+        Notes
+        -----
+        - If `convert_inputs=True`, inputs are tracked and converted using layout config.
+        - Strategy is chosen from `self.strategy`, or auto-detected if set to 'auto'.
+        - If batch axis is detected, dispatches to `_process_batch`; else to `_process_images`.
+        - This method serves as the main entry point for processing logic.
         """
         if len(images) < 1:
             raise ValueError("At least one image must be provided.")
@@ -165,9 +224,36 @@ class ImageProcessor(OperatorCore):
         )
 
     # ====[ STRATEGY AUTO-DETECTION ]====
-    def _detect_strategy(self, images: Sequence[ArrayLike]) -> str:       
+    def _detect_strategy(self, images: Sequence[ArrayLike]) -> str:
         """
-        Infer a safe processing strategy from input types.
+        Infer the most appropriate processing strategy based on input types.
+
+        Determines whether to apply a Torch-based, vectorized NumPy, or classic fallback
+        processing strategy depending on the types of all provided images.
+
+        Parameters
+        ----------
+        images : Sequence of np.ndarray or torch.Tensor
+            List of input images to inspect.
+
+        Returns
+        -------
+        str
+            One of the following:
+            - 'torch'       : if all inputs are Torch tensors.
+            - 'vectorized'  : if all inputs are NumPy arrays.
+            - 'classic'     : if inputs are mixed NumPy and Torch (fallback).
+
+        Raises
+        ------
+        ValueError
+            If the input types are unsupported or inconsistent.
+        
+        Notes
+        -----
+        - This method is used when `strategy='auto'`.
+        - Mixed inputs trigger a fallback to 'classic' strategy.
+        - All inputs must be either array-like and of the same backend type, or mixed NumPy/Torch.
         """
         if all(isinstance(x, torch.Tensor) for x in images):
             return "torch"
@@ -181,21 +267,45 @@ class ImageProcessor(OperatorCore):
     @torch.no_grad()
     def _process_batch(self, *images: ArrayLike, strategy: str, func: Optional[Callable] = None):
         """
-        Process images with a batch axis (N).
+        Process a batch of ND images using a configured or custom function.
+
+        Handles inputs with a batch axis (typically axis 0), and dispatches
+        to the appropriate strategy: torch-native, vectorized NumPy, classic loop,
+        or parallel processing.
 
         Parameters
         ----------
-        images : list[ndarray | Tensor]
-            Inputs with a batch axis.
-        strategy : {'torch','vectorized','classic','parallel'}
-            Processing strategy.
+        images : list of np.ndarray or torch.Tensor
+            Input images or tensors, all with a batch dimension.
+            Shapes must be compatible across inputs.
+        strategy : {'torch', 'vectorized', 'classic', 'parallel'}
+            Processing strategy to use:
+            - 'torch'      → call `_apply_torch` directly.
+            - 'vectorized' → call `_apply_vectorized` directly.
+            - 'classic'    → apply function slice-by-slice.
+            - 'parallel'   → apply function slice-by-slice in parallel (joblib).
         func : callable, optional
-            Alternative function to apply instead of self.function.
+            Optional override for the processing function (`self.function`).
 
         Returns
         -------
-        ndarray | Tensor
-            Aggregated output with tags restored.
+        np.ndarray or torch.Tensor
+            Output with batch dimension preserved.
+            AxisTracker tags are applied and updated per batch output.
+
+        Raises
+        ------
+        ValueError
+            If batch axis is not defined or if input types are unsupported.
+
+        Notes
+        -----
+        - Automatically reorders batch axis to front if needed (N → 0).
+        - Tags from inputs are tracked and restored on outputs.
+        - If `img_process_fallback` is enabled and batch axis is already leading,
+        a fast-path dispatch to `torch` or `vectorized` is used.
+        - For 'classic' and 'parallel' modes, individual slices are tracked,
+        processed, and reassembled via `_aggregate`.
         """
         batch_axis = self.get_axis(images[0], "batch_axis")
         if batch_axis is None:
@@ -258,21 +368,43 @@ class ImageProcessor(OperatorCore):
     @torch.no_grad()
     def _process_images(self, *images: ArrayLike, strategy: str, func: Optional[Callable] = None):
         """
-        Slice-wise (channel-first) processing when there is no batch axis.
+        Apply slice-wise processing on ND images when no batch axis is present.
+
+        Handles processing along the channel axis (if present), using the configured
+        or specified strategy (torch, vectorized, classic, or parallel).
+        Supports channel-aware reshaping, tag propagation, and backend dispatching.
 
         Parameters
         ----------
-        images : list[ndarray | Tensor]
-            Same-shape inputs; first dimension is sliced if channel_axis != 0.
-        strategy : {'torch','vectorized','classic','parallel'}
-            Processing strategy.
+        images : list of np.ndarray or torch.Tensor
+            Input images with the same shape. If `channel_axis` is defined and not 0,
+            data is sliced along that axis for independent processing.
+        strategy : {'torch', 'vectorized', 'classic', 'parallel'}
+            Processing strategy to apply:
+            - 'torch'      → backend-native operation using `_apply_torch`.
+            - 'vectorized' → NumPy vectorized processing.
+            - 'classic'    → sequential slice-by-slice execution.
+            - 'parallel'   → parallel slice execution using joblib.
         func : callable, optional
-            Alternative function to apply.
+            Override function to apply instead of `self.function`.
 
         Returns
         -------
-        ndarray | Tensor
-            Reconstructed output with tags.
+        np.ndarray or torch.Tensor
+            Processed output with reconstructed shape.
+            Tags are preserved and updated (status='slice_output').
+
+        Raises
+        ------
+        ValueError
+            If input types are unsupported or shapes mismatch.
+
+        Notes
+        -----
+        - If no channel axis is defined, falls back to fast-path full-image processing.
+        - Automatically reorders axes so that slicing occurs along the first dimension (C → 0).
+        - Each slice is tracked individually for metadata propagation.
+        - Final outputs are reassembled and tagged using `_aggregate`.
         """
         channel_axis = self.get_axis(images[0], "channel_axis")
         # Fallback to fast path when no channel axis (treat as single-slice)
@@ -334,21 +466,39 @@ class ImageProcessor(OperatorCore):
     @torch.no_grad()
     def _apply_torch(self, images_swapped: List[ArrayLike], originals: List[ArrayLike], func: Optional[Callable] = None):
         """
-        Stack along leading dim and process on device (Torch strategy).
+        Stack, track, and apply the processing function using Torch strategy.
+
+        Converts image slices to Torch tensors (if needed), stacks them along
+        the leading dimension (channel or batch), and runs the function on-device.
 
         Parameters
         ----------
-        images_swapped : list[Tensor | ndarray]
-            Inputs with leading dim = channel or batch.
-        originals : list[Tensor | ndarray]
-            Original full images.
+        images_swapped : list of Tensor or ndarray
+            Inputs prepared for processing, with leading dimension ready for stacking
+            (e.g., batch or channel axis moved to dim=0).
+        originals : list of Tensor or ndarray
+            Original images before axis reordering. Used for reconstructing final shape/tags.
         func : callable, optional
-            Alternative function to apply.
+            Optional override for the processing function (`self.function`).
 
         Returns
         -------
-        Tensor | ndarray
-            Reconstructed output with tags.
+        torch.Tensor or np.ndarray
+            Final output after processing and reassembly.
+            Tags are preserved and updated via AxisTracker.
+
+        Raises
+        ------
+        TypeError
+            If input slices are not NumPy arrays or Torch tensors.
+        ValueError
+            If image slice list is empty or None.
+
+        Notes
+        -----
+        - Slices are moved to the appropriate device (as per `self.device`).
+        - AxisTracker is used to tag the stacked tensor before processing.
+        - The output is passed to `_reconstruct_output` for final reassembly and tag restoration.
         """
         stacked : List[torch.Tensor] = []
 
@@ -383,21 +533,39 @@ class ImageProcessor(OperatorCore):
     # ====[ Vectorized Strategy Execution ]====
     def _apply_vectorized(self, images_swapped: List[ArrayLike], originals: List[ArrayLike], func: Optional[Callable] = None):
         """
-        Stack and apply a vectorized function across leading dim (NumPy).
+        Stack and apply a NumPy vectorized function across the leading dimension.
+
+        Designed for fast NumPy-native operations where batch or channel-wise
+        processing can be applied on a stacked array. Tags and layout metadata
+        are preserved via AxisTracker.
 
         Parameters
         ----------
-        images_swapped : list[ndarray]
-            Inputs with leading dim = channel or batch.
-        originals : list[ndarray]
-            Original full images.
+        images_swapped : list of np.ndarray
+            Inputs with leading axis (typically batch or channel) moved to dim=0.
+        originals : list of np.ndarray
+            Original unmodified images used for reconstructing the final layout and tags.
         func : callable, optional
-            Alternative function to apply.
+            Custom function to apply instead of the default `self.function`.
 
         Returns
         -------
-        ndarray | Tensor
-            Reconstructed output with tags.
+        np.ndarray or torch.Tensor
+            Output after vectorized processing, reassembled with correct layout and tags.
+
+        Raises
+        ------
+        TypeError
+            If any image slice is not a NumPy array.
+        ValueError
+            If any image list is empty.
+
+        Notes
+        -----
+        - This method is only valid for NumPy inputs. Torch tensors are not supported.
+        - Inputs are stacked along axis 0 before being passed to the processing function.
+        - Uses `AxisTracker.stack_from` to ensure tag propagation and layout consistency.
+        - The output is passed through `_reconstruct_output` for final restoration.
         """
         stacked : List[np.ndarray] = []
 
@@ -426,21 +594,46 @@ class ImageProcessor(OperatorCore):
     # ====[ OUTPUT RECONSTRUCTION ]====
     def _reconstruct_output(self, outputs: Any, originals: Optional[List[ArrayLike]] = None, swapped: Optional[List[ArrayLike]] = None):
         """
-        Rebuild a full output from per-slice/batch results with tag consistency.
+        Rebuild the full ND output from per-slice or per-batch results, restoring axes and tags.
+
+        This function reassembles the output tensor or array into its original layout 
+        using metadata tracked during processing (e.g., axis positions, tags). It ensures 
+        consistency in dimension order (batch/channel) and preserves axis semantics.
 
         Parameters
         ----------
-        outputs : scalar | ndarray | Tensor | list | tuple
-            Result from the processing function.
-        originals : list, optional
-            Original images (for axis restoration).
-        swapped : list, optional
-            Inputs with leading slice dim.
+        outputs : scalar | np.ndarray | torch.Tensor | list | tuple
+            Output returned by the processing function. Can be a single value, ND array, 
+            or list/tuple of slices to be stacked.
+        originals : list of ArrayLike, optional
+            Original input images used to determine correct axis restoration (channel/batch).
+        swapped : list of ArrayLike, optional
+            Inputs after channel/batch axis was moved to the front (dim=0); used for tag inheritance.
 
         Returns
         -------
-        ndarray | Tensor
-            Final output in self.output_format with tag.
+        np.ndarray or torch.Tensor
+            Final reconstructed output in the requested framework (`self.output_format`),
+            with axes and layout tags correctly restored.
+
+        Raises
+        ------
+        TypeError
+            If the output is `None` or of an unsupported type.
+
+        Notes
+        -----
+        - Handles both scalar and ND-array outputs.
+        - Restores the correct `channel_axis` or `batch_axis` via `moveaxis` if necessary.
+        - All outputs are wrapped and tracked using `AxisTracker` to preserve processing tags.
+        - Supports automatic stacking for list/tuple of slices and tensor/array results.
+
+        Examples
+        --------
+        >>> # Scalar case
+        >>> _reconstruct_output(0.85)
+        >>> # ND case with swapped shape (N, H, W)
+        >>> _reconstruct_output([arr1, arr2], originals=[orig], swapped=[swp])
         """
         if outputs is None:
             raise TypeError("[ImageProcessor] Function returned None.")
@@ -506,21 +699,47 @@ class ImageProcessor(OperatorCore):
     # ====[ AGGREGATION ]====
     def _aggregate(self, results: List[Any], originals: Optional[List[ArrayLike]] = None, swapped: Optional[List[ArrayLike]] = None):
         """
-        Aggregate per-slice/batch results (scalars, arrays, or tuples of arrays).
+        Aggregate per-slice or per-batch results into a single ND output, restoring original layout and tags.
+
+        This method consolidates the outputs produced slice-by-slice or batch-by-batch using the specified
+    strategy (classic, parallel, etc.). It handles scalar outputs, array outputs, and optionally tuples of arrays.
 
         Parameters
         ----------
         results : list
-            Outputs produced per slice/batch.
-        originals : list, optional
-            Original images for axis restoration.
-        swapped : list, optional
-            Inputs with leading slice dim.
+            List of outputs from each processed slice or batch. Can contain:
+            - Scalars (int, float, or 0D arrays/tensors),
+            - ND arrays or tensors,
+            - Tuples of ND arrays/tensors (if `self.return_tuple` is True).
+        originals : list of ArrayLike, optional
+            Original input images (before axis permutation), used to restore layout.
+        swapped : list of ArrayLike, optional
+            Inputs after channel/batch axis was moved to leading position; used for tag tracking.
 
         Returns
         -------
-        ndarray | Tensor | tuple
-            Aggregated output, tags preserved.
+        np.ndarray or torch.Tensor or tuple
+            Aggregated output reconstructed in the correct layout, with axis tags and metadata restored.
+
+        Raises
+        ------
+        ValueError
+            If the results list is empty.
+
+        Notes
+        -----
+        - Axis restoration uses channel_axis or batch_axis based on the layout of `originals`.
+        - If `self.return_tuple` is True, each element of the tuple is stacked and restored independently.
+        - For scalar results, a tensor/array is created and tagged accordingly.
+        - Tagging is handled via `AxisTracker` and `track_and_stack` utilities.
+
+        Examples
+        --------
+        >>> # Example with scalar outputs
+        >>> _aggregate([0.1, 0.2, 0.15])
+
+        >>> # Example with 3D slices
+        >>> _aggregate([slice1, slice2, slice3], originals=[original], swapped=[swapped])
         """
         if not results:
             raise ValueError("Cannot aggregate an empty list of results.")
@@ -572,21 +791,43 @@ class ImageProcessor(OperatorCore):
     # ====[ SLICE TRACKER SHORTCUTS ]====
     def track_slice(self, full_img: ArrayLike, slice_img: ArrayLike, remove_axes: Iterable[str] = ("G", "N", "C")) -> ArrayLike:
         """
-        Build a tracked slice from a full image, removing specified axes.
+        Create a tracked view of a slice extracted from a full ND image, with axis tag adjustment.
+
+        This method propagates the AxisTracker metadata from the original full image (`full_img`)
+        to the extracted slice (`slice_img`), while removing specific axes (e.g., 'C' for channel,
+        'N' for batch, etc.) that are no longer relevant in the context of the slice.
 
         Parameters
         ----------
-        full_img : ndarray | Tensor
-            Full image holding the original tag.
-        slice_img : ndarray | Tensor
-            Slice extracted from full_img.
-        remove_axes : tuple[str]
-            Axes to drop from the tag (e.g., 'C' or 'N').
+        full_img : np.ndarray or torch.Tensor
+            Full input image containing the original `AxisTracker` metadata (e.g., axis roles, UID).
+        slice_img : np.ndarray or torch.Tensor
+            Slice extracted from `full_img`, typically during per-slice or per-batch processing.
+        remove_axes : Iterable[str], default=("G", "N", "C")
+            Axes to remove from the propagated metadata. Typical values:
+            - 'C' for channel axis,
+            - 'N' for batch axis,
+            - 'G' for group axis.
 
         Returns
         -------
         AxisTracker
-            Tracked slice wrapper.
+            Tagged slice image with updated metadata and reduced axis roles.
+
+        Raises
+        ------
+        ValueError
+            If either `full_img` or `slice_img` is None.
+
+        Notes
+        -----
+        - The propagated metadata includes axis mapping, layout name, UID, and processing status.
+        - This function is central to per-slice or per-batch dispatching in `ImageProcessor`.
+        - Internally uses `AxisTracker.from_sliced`.
+
+        Examples
+        --------
+        >>> tracker = image_processor.track_slice(full_img, full_img[0], remove_axes=("C",))
         """
         if full_img is None or slice_img is None:
             raise ValueError("Both full_img and slice_img must be provided.")
@@ -598,23 +839,42 @@ class ImageProcessor(OperatorCore):
     # ====[ Slice Stacking Tracker Shortcut ]====
     def track_and_stack(self, ref: ArrayLike, slices: Sequence[ArrayLike], axis: int = 0, status: str = "aggregated") -> ArrayLike:
         """
-        Stack slices with tag propagation.
+        Stack a list of slices into a single array/tensor and propagate AxisTracker metadata.
+
+        This method stacks multiple slices (e.g., per-channel or per-batch outputs)
+        and transfers the AxisTracker tag from a reference array (`ref`) to the newly
+        stacked object. Axis metadata, status and output shape are updated accordingly.
 
         Parameters
         ----------
-        ref : ndarray | Tensor
-            Reference array/tensor to inherit tag from.
-        slices : list[ndarray | Tensor]
-            List of slices to stack.
-        axis : int
-            Axis along which to stack.
-        status : str
-            Tag status to set.
+        ref : np.ndarray or torch.Tensor
+            Reference input used to retrieve original AxisTracker metadata.
+        slices : list of np.ndarray or torch.Tensor
+            Slices to be stacked along a new or existing axis.
+        axis : int, default=0
+            Axis along which to stack the slices.
+        status : str, default="aggregated"
+            Status tag to assign to the resulting stacked object (e.g., "stacked", "aggregated").
 
         Returns
         -------
         AxisTracker
-            Tracker wrapping the stacked array/tensor.
+            Tracked object wrapping the stacked array or tensor, with updated metadata.
+
+        Raises
+        ------
+        ValueError
+            If `slices` is empty or contains a None element.
+
+        Notes
+        -----
+        - The resulting object retains the axis metadata (`AxisMap`) of the reference.
+        - The `shape_after` tag is updated based on the stacked shape.
+        - This is commonly used to reconstruct outputs in `_aggregate` or `_reconstruct_output`.
+
+        Examples
+        --------
+        >>> stacked = image_processor.track_and_stack(ref=img, slices=[img1, img2], axis=0, status="reconstructed")
         """
         if not slices or slices[0] is None:
             raise ValueError("Invalid or empty slice list for stacking.")
@@ -629,7 +889,31 @@ class ImageProcessor(OperatorCore):
     # ====[ ASSERTION / TOOLS / SUMMARY ]====
     def _assert_tracked(self, image: ArrayLike) -> None:
         """
-        Ensure the image has an AxisTracker tag; raise otherwise.
+        Ensure that the given image has an attached AxisTracker tag.
+
+        This method verifies that the input image (NumPy array or Torch tensor)
+        is associated with a valid AxisTracker. If the tag is missing, an informative
+        RuntimeError is raised to prevent further processing without axis metadata.
+
+        Parameters
+        ----------
+        image : np.ndarray or torch.Tensor
+            Image or tensor to check for AxisTracker tagging.
+
+        Raises
+        ------
+        RuntimeError
+            If the input is not tagged with AxisTracker for the current framework.
+
+        Notes
+        -----
+        - This check is used internally to enforce metadata consistency.
+        - The framework is inferred from `self.framework`, defaulting to 'torch'.
+        - Typically used before axis-aware operations such as moveaxis, reshape, or slicing.
+
+        Examples
+        --------
+        >>> self._assert_tracked(my_tensor)  # Raises if not tagged
         """
         fw = self.framework or "torch"
         if not self.has_tag(image, fw):
@@ -640,23 +924,44 @@ class ImageProcessor(OperatorCore):
 
     def _infer_stack_key(self) -> str:
         """
-        Return stack axis key based on resolved axes.
+        Infer the axis key used for stacking operations.
+
+        Returns
+        -------
+        str
+            'batch_axis' if defined in self.axes, otherwise 'channel_axis'.
+
+        Notes
+        -----
+        This utility determines the most appropriate axis for stacking slices
+        during image processing. It prioritizes the batch axis when available,
+        falling back to the channel axis otherwise.
         """
         return "batch_axis" if self.axes.get("batch_axis", None) is not None else "channel_axis"
 
     def map(self, *batches: ArrayLike) -> ArrayLike:
         """
-        Map the processor to a batch of images (apply per element).
+        Apply the processor element-wise to a batch (or multiple batches).
+
+        Iterates over the first axis ("N") of each input and applies the configured
+        processor individually to each slice, tracking axes and metadata.
 
         Parameters
         ----------
-        *batches : ndarray | Tensor
-            Batches to process (iterate over leading N).
+        *batches : np.ndarray or torch.Tensor
+            One or more ND batches. Each batch must be iterable along its first axis
+            (i.e., shape (N, ...)).
 
         Returns
         -------
-        ndarray | Tensor
-            Processed batch.
+        np.ndarray or torch.Tensor
+            Batch of processed results, with shape and backend matching the input.
+
+        Notes
+        -----
+        - Uses `track_slice` to preserve axis tags and UID information per image.
+        - The leading batch axis ("N") is ignored for tagging consistency.
+        - `sync_axes_from_tag` ensures all slices use a common axis layout before processing.
         """
         slices_and_tagged = [
             self.track_slice(images, image, remove_axes=["N"]) for images in batches for image in images

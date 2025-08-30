@@ -25,8 +25,17 @@ Framework = Literal["numpy", "torch"]
 
 class DiffOperator(OperatorCore):
     """
-    Differential operator for computing gradients, divergences, and Laplacians
-    on ND images using various strategies (NumPy, Torch, Parallel).
+    N-dimensional differential operator for computing gradients, divergences, and Laplacians.
+
+    Supports multiple computation strategies (NumPy, Torch, Parallel) and
+    handles layout-aware axis tagging, spacing, and backend consistency.
+
+    Notes
+    -----
+    - Gradient, divergence, and Laplacian are computed via finite differences.
+    - Axes are auto-detected or configured via `LayoutConfig`.
+    - Compatible with both NumPy and Torch inputs.
+    - Strategy and fallback behavior are defined in `DiffOperatorConfig`.
     """
 
     def __init__(
@@ -37,9 +46,19 @@ class DiffOperator(OperatorCore):
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
         """
-        Initialize a differential operator (gradient, divergence, laplacian)
-        compatible with ND tensors and multiple computation strategies.
+        Initialize the DiffOperator for ND differential computations.
 
+        Parameters
+        ----------
+        diff_operator_cfg : DiffOperatorConfig
+            Configuration for gradient, divergence, and Laplacian computation strategies,
+            including difference mode, boundary conditions, and fallback handling.
+        ndconvolver_cfg : NDConvolverConfig
+            Optional configuration used when differential ops require convolution fallback.
+        layout_cfg : LayoutConfig
+            Axis layout configuration (e.g., spatial, batch, channel).
+        global_cfg : GlobalConfig
+            Framework preferences (NumPy or Torch), device, output format, and spacing behavior.
         """
         # ====[ Configuration ]====
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -103,6 +122,14 @@ class DiffOperator(OperatorCore):
         )
 
     def _log(self, msg: str) -> None:
+        """
+        Print a message if verbose mode is enabled.
+
+        Parameters
+        ----------
+        msg : str
+            Message to print to stdout.
+        """
         if self.verbose:
             print(msg)
 
@@ -110,7 +137,20 @@ class DiffOperator(OperatorCore):
 
     def _strategy_expects(self, fw_current: str) -> str:
         """
-        Return the backend expected by the chosen strategy.
+        Return the backend expected by the selected computation strategy.
+
+        Parameters
+        ----------
+        fw_current : str
+            Current framework in use ('numpy' or 'torch').
+
+        Returns
+        -------
+        str
+            Expected backend for the configured strategy. Returns:
+            - 'torch'   → if strategy is 'torch'
+            - 'numpy'   → if strategy is 'parallel', 'classic', or 'vectorized'
+            - fw_current → for strategy 'auto' (no override)
         """
         if self.strategy == "torch":
             return "torch"
@@ -121,7 +161,27 @@ class DiffOperator(OperatorCore):
 
     def _ensure_backend(self, x: ArrayLike, target_fw: str) -> ArrayLike:
         """
-        Convert `x` to the target backend when needed, preserving tags/layout.
+        Ensure that the input array uses the target computation backend.
+
+        Converts between NumPy and Torch when necessary, preserving layout, tags,
+        and status information for traceability.
+
+        Parameters
+        ----------
+        x : np.ndarray or torch.Tensor
+            Input array or tensor to verify or convert.
+        target_fw : {'numpy', 'torch'}
+            Desired target backend for downstream operations.
+
+        Returns
+        -------
+        np.ndarray or torch.Tensor
+            Input converted to the target backend, or returned as-is if already compatible.
+
+        Notes
+        -----
+        - Conversion is handled via `to_framework`, which applies proper tagging.
+        - No conversion is performed if the input already matches the target framework.
         """
         if target_fw == "torch" and isinstance(x, np.ndarray):
             return self.to_framework(x, framework="torch", status="input")
@@ -146,33 +206,50 @@ class DiffOperator(OperatorCore):
         to_return: Sequence[str] = ("gradient",),
     ) -> Union[ArrayLike, Tuple[ArrayLike, ArrayLike]]:
         """
-        Compute the ND gradient of an input tensor/image.
+        Compute the N-dimensional gradient of an image or tensor.
+
+        Supports multiple computation strategies (Torch, NumPy, parallel, classic)
+        with automatic backend adaptation and tag propagation.
 
         Parameters
         ----------
-        u : Tensor | ndarray
-            Input image.
-        enable_uid : bool
-            Enable tagging with UID.
-        op_params : dict | None
-            Optional metadata for tagging.
-        framework : str | None
-            Force backend (torch, numpy).
-        output_format : str | None
-            Output format.
-        track : bool
-            Enable AxisTracker propagation.
-        trace_limit : int
-            Tag history limit.
-        normalize_override : bool | None
-            Override normalize behavior locally.
-        to_return : sequence of {'gradient','magnitude'}
-            Choose outputs to return.
+        u : np.ndarray or torch.Tensor
+            Input image or tensor. May be 2D, 3D, or ND.
+        enable_uid : bool, default False
+            Whether to assign a unique ID in the tag.
+        op_params : dict, optional
+            Metadata dictionary to embed in the tag (e.g., {'method': 'gradient'}).
+        framework : {'torch', 'numpy'}, optional
+            Force the input backend. If None, inferred from input or config.
+        output_format : {'torch', 'numpy'}, optional
+            Format of the returned gradient. Defaults to `self.output_format`.
+        track : bool, default True
+            If True, preserve tagging and axis metadata in the output.
+        trace_limit : int, default 10
+            Max number of trace entries to keep in tag history.
+        normalize_override : bool, optional
+            Override global normalization behavior locally.
+        to_return : Sequence[str], default ('gradient',)
+            Choose which outputs to return. Valid values: 'gradient', 'magnitude', or both.
 
         Returns
         -------
-        grad or (grad, magnitude)
-            Tagged outputs in requested format.
+        grad : ArrayLike
+            The computed gradient (tensor with shape: (D, ...) where D = spatial dims).
+        magnitude : ArrayLike, optional
+            Gradient magnitude (L2 norm across spatial dimensions), if requested.
+
+        Raises
+        ------
+        TypeError
+            If the input format is unsupported or framework cannot be inferred.
+
+        Notes
+        -----
+        - The computation strategy is controlled by `self.strategy` ('torch', 'parallel', 'classic', etc.).
+        - Axes are automatically inferred from the layout config or tags.
+        - Output tensors are tagged, and their status is updated to reflect the operation performed.
+        - This method is ND-compatible and supports both CPU and GPU backends.
         """
         # === Convert input image and assign framework ===
         u = self.convert_once(
@@ -248,33 +325,48 @@ class DiffOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        Compute the divergence of a vector field v (e.g., gradient output).
+        Compute the N-dimensional divergence of a vector field.
+
+        This is the divergence ∇·v where `v` is a vector field (first axis = direction),
+        typically the output of `gradient()`. Supports optional per-dimension weighting.
 
         Parameters
         ----------
-        v : torch.Tensor | np.ndarray
-            Input ND vector field (first axis = direction axis).
-        weight : torch.Tensor | np.ndarray | None
-            Optional weight tensor.
-        enable_uid : bool
-            Enable tagging with UID.
-        op_params : dict | None
-            Optional metadata for tagging.
-        framework : str | None
-            Force backend (torch, numpy).
-        output_format : str | None
-            Output format.
-        track : bool
-            Enable AxisTracker propagation.
-        trace_limit : int
-            Tag history limit.
-        normalize_override : bool | None
-            Override normalize behavior locally.
+        v : np.ndarray or torch.Tensor
+            Input vector field. Shape must be (D, ...) where D is the number of spatial axes.
+        weight : np.ndarray or torch.Tensor, optional
+            Optional weighting array (same shape as `v`) to modulate the divergence.
+        enable_uid : bool, default False
+            Whether to assign a UID to the output tag.
+        op_params : dict, optional
+            Metadata dictionary to embed in the output tag.
+        framework : {'torch', 'numpy'}, optional
+            Force backend. If None, inferred from input or configuration.
+        output_format : {'torch', 'numpy'}, optional
+            Output format. If None, uses `self.output_format`.
+        track : bool, default True
+            If True, maintain tag and axis tracking in the output.
+        trace_limit : int, default 10
+            Maximum length of the tag's operation history.
+        normalize_override : bool, optional
+            Override normalization behavior for this operation.
 
         Returns
         -------
-        div : torch.Tensor | np.ndarray
-            ND divergence image.
+        div : np.ndarray or torch.Tensor
+            The computed divergence map, in the requested backend format.
+
+        Raises
+        ------
+        TypeError
+            If the input type is not supported or the backend cannot be inferred.
+
+        Notes
+        -----
+        - The computation strategy is selected via `self.strategy`.
+        - Weighting is applied per direction before summing if `weight` is provided.
+        - Tagging and axis semantics are preserved and updated via `to_output()`.
+        - This method supports both 2D and ND fields (3D, 4D, etc.).
         """
         # === Preprocess and tag input ===
         v = self.convert_once(
@@ -333,31 +425,42 @@ class DiffOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        Compute the ND Laplacian of input `u` as div(grad(u)).
+        Compute the Laplacian of a scalar ND image using div(grad(u)).
+
+        This operation computes the divergence of the gradient of the input,
+        combining two finite-difference operators in sequence. Supports both
+        NumPy and Torch backends and preserves tags and layout information.
 
         Parameters
         ----------
-        u : torch.Tensor | np.ndarray
-            Input ND scalar image.
-        enable_uid : bool
-            Enable tagging and UID tracking.
-        op_params : dict | None
-            Optional metadata for tagging.
-        framework : str | None
-            Backend to use ('torch' or 'numpy').
-        output_format : str | None
-            Desired output format.
-        track : bool
-            Enable AxisTracker tagging.
-        trace_limit : int
-            Tag memory depth.
-        normalize_override : bool | None
-            Override global normalization.
+        u : np.ndarray or torch.Tensor
+            Input scalar image (ND). Should be float and spatially structured.
+        enable_uid : bool, default False
+            Whether to assign a unique UID in the output tag.
+        op_params : dict, optional
+            Optional metadata to include in the output tag.
+        framework : {'torch', 'numpy'}, optional
+            Force computation in a specific backend. If None, auto-inferred.
+        output_format : {'torch', 'numpy'}, optional
+            Desired format of the output. If None, uses `self.output_format`.
+        track : bool, default True
+            Enable propagation of AxisTracker and tagging information.
+        trace_limit : int, default 10
+            Maximum number of operations to track in tag history.
+        normalize_override : bool, optional
+            Override global normalization setting locally.
 
         Returns
         -------
-        laplacian : torch.Tensor | np.ndarray
-            The Laplacian of `u`, tagged and formatted.
+        laplacian : np.ndarray or torch.Tensor
+            The Laplacian of `u`, in the desired backend and layout.
+
+        Notes
+        -----
+        - Computed as ∇·(∇u) using sequential calls to `gradient()` and `divergence()`.
+        - Axes and layout are inferred from tags or `LayoutConfig`.
+        - Tagging is preserved throughout the operation pipeline.
+        - Compatible with arbitrary dimensions (2D, 3D, ND).
         """
         # Step 1 — Gradient
         grad_u = self.gradient(
@@ -406,12 +509,44 @@ class DiffOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        Compute the full ND Hessian matrix H(u) directly from scalar input u.
+        Compute the full N-dimensional Hessian matrix of a scalar field u.
+
+        Returns the second-order derivatives of u with respect to all spatial
+        directions, forming a symmetric matrix of shape (D, D, ...), where D
+        is the number of spatial axes.
+
+        Parameters
+        ----------
+        u : np.ndarray or torch.Tensor
+            Input scalar image (ND), assumed to be float and differentiable.
+        enable_uid : bool, default False
+            Whether to assign a unique UID to the output tag.
+        op_params : dict, optional
+            Optional metadata to embed in the output tag.
+        framework : {'torch', 'numpy'}, optional
+            Force the backend used for computation. If None, inferred automatically.
+        output_format : {'torch', 'numpy'}, optional
+            Desired output backend for the result.
+        track : bool, default True
+            Whether to preserve and propagate AxisTracker metadata.
+        trace_limit : int, default 10
+            Limit the number of operations stored in the tag trace.
+        normalize_override : bool, optional
+            Locally override normalization behavior.
 
         Returns
         -------
-        hess : torch.Tensor | np.ndarray
-            ND Hessian matrix of shape (D, D, ...)
+        hess : np.ndarray or torch.Tensor
+            The Hessian matrix of shape (D, D, ...) where D is the number of spatial axes.
+            Each (i, j, ...) component corresponds to ∂²u / ∂x_i∂x_j.
+
+        Notes
+        -----
+        - Strategy dispatch is handled based on `self.strategy` and input backend.
+        - The input is converted and tagged before processing.
+        - Output is passed through `to_output()` to preserve tags and format.
+        - ND-compatible for 2D, 3D, and higher dimensions.
+        - Layout is respected and spatial axes are inferred via tag or config.
         """
         u = self.convert_once(
             image=u,
@@ -473,18 +608,42 @@ class DiffOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        Compute the Sobel gradient magnitude of an ND image.
+        Compute the Sobel gradient magnitude of an N-dimensional image.
+
+        Applies the Sobel operator along each spatial axis, computes directional
+        gradients, and combines them into a single magnitude map (L2 norm).
+        Automatically dispatches to the appropriate backend (Torch or NumPy),
+        with optional fallback behavior.
 
         Parameters
         ----------
-        u : torch.Tensor | np.ndarray
-            Input image or volume.
-        Same parameters as gradient().
+        u : np.ndarray or torch.Tensor
+            Input image or volume. Can be 2D, 3D, or ND.
+        enable_uid : bool, default False
+            Assign a unique identifier in the output tag.
+        op_params : dict, optional
+            Optional metadata for tagging and trace history.
+        framework : {'torch', 'numpy'}, optional
+            Force a specific backend. If None, inferred automatically.
+        output_format : {'torch', 'numpy'}, optional
+            Desired output format.
+        track : bool, default True
+            Enable AxisTracker tagging and propagation.
+        trace_limit : int, default 10
+            Maximum tag history length.
+        normalize_override : bool, optional
+            Local override of normalization behavior.
 
         Returns
         -------
-        sobel_mag : torch.Tensor | np.ndarray
-            Sobel magnitude map.
+        sobel_mag : np.ndarray or torch.Tensor
+            Magnitude of the Sobel gradient, with backend and format defined by output configuration.
+
+        Notes
+        -----
+        - If the Torch backend is selected but unsupported, the operator falls back to NumPy.
+        - The output is tagged and layout-aware, and preserves spatial shape.
+        - ND versions of the Sobel operator apply directional filters per axis.
         """
         # === Convert input ===
         u = self.convert_once(
@@ -545,7 +704,40 @@ class DiffOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        ND Sobel gradient (Torch or NumPy).
+        Compute the N-dimensional Sobel gradient vector of an image or volume.
+
+        Applies directional Sobel filters along each spatial axis and returns the
+        full gradient tensor (shape: D × ...), where D is the number of spatial dimensions.
+
+        Parameters
+        ----------
+        u : np.ndarray or torch.Tensor
+            Input scalar image or volume. Can be 2D, 3D, or higher.
+        enable_uid : bool, default False
+            Assign a unique identifier to the output tag.
+        op_params : dict, optional
+            Additional metadata for tagging.
+        framework : {'torch', 'numpy'}, optional
+            Force backend to use. If None, inferred from input.
+        output_format : {'torch', 'numpy'}, optional
+            Format for the output. If None, uses `self.output_format`.
+        track : bool, default True
+            Enable AxisTracker propagation and tagging.
+        trace_limit : int, default 10
+            Max number of operations to store in the trace history.
+        normalize_override : bool, optional
+            Locally override the normalization behavior.
+
+        Returns
+        -------
+        grad : np.ndarray or torch.Tensor
+            Sobel gradient tensor of shape (D, ...) in the specified format.
+
+        Notes
+        -----
+        - The gradient is computed using directional Sobel filters along each spatial axis.
+        - If the Torch backend is selected but unsupported, fallback to NumPy is used.
+        - The result is ND-compatible and layout-aware, preserving tags and axis roles.
         """
         # === Convert input ===
         u = self.convert_once(
@@ -606,7 +798,42 @@ class DiffOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        Compute the ND Hessian matrix using Sobel second derivatives (Torch or NumPy).
+        Compute the N-dimensional Hessian matrix using Sobel second derivatives.
+
+        This method uses directional Sobel filters to approximate second-order
+        partial derivatives, resulting in a full symmetric Hessian tensor.
+
+        Parameters
+        ----------
+        u : np.ndarray or torch.Tensor
+            Input scalar image or volume (ND).
+        enable_uid : bool, default False
+            Whether to assign a unique UID to the output tag.
+        op_params : dict, optional
+            Additional metadata to embed in the output tag.
+        framework : {'torch', 'numpy'}, optional
+            Force the backend to use. If None, inferred from input.
+        output_format : {'torch', 'numpy'}, optional
+            Desired format for the returned tensor.
+        track : bool, default True
+            Enable propagation of AxisTracker metadata.
+        trace_limit : int, default 10
+            Maximum number of trace operations stored.
+        normalize_override : bool, optional
+            Override normalization behavior locally.
+
+        Returns
+        -------
+        hessian : np.ndarray or torch.Tensor
+            ND Hessian matrix of shape (D, D, ...) where D is the number of spatial axes.
+
+        Notes
+        -----
+        - Backend is selected dynamically or via parameter.
+        - If `diff_fallback` is True and backend is Torch, fallback to NumPy is used.
+        - Each entry H[i, j, ...] corresponds to the second-order derivative ∂²u/∂x_i∂x_j.
+        - Output is tagged with layout and operation trace via `to_output()`.
+        - Compatible with ND images: 2D, 3D, or higher.
         """
         # Convert and assign backend
         u = self.convert_once(
@@ -667,7 +894,42 @@ class DiffOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        ND Scharr gradient (Torch or NumPy).
+        Compute the N-dimensional Scharr gradient of an image.
+
+        Applies the Scharr operator along each spatial axis to estimate directional gradients.
+        Produces a stacked tensor of shape (D, ...), where D is the number of spatial dimensions.
+
+        Parameters
+        ----------
+        u : np.ndarray or torch.Tensor
+            Input scalar image (2D, 3D, or ND).
+        enable_uid : bool, default False
+            Whether to assign a UID to the output tag.
+        op_params : dict, optional
+            Optional metadata to embed in the tag.
+        framework : {'torch', 'numpy'}, optional
+            Backend to use for computation. If None, inferred automatically.
+        output_format : {'torch', 'numpy'}, optional
+            Format of the returned result.
+        track : bool, default True
+            Whether to propagate tagging and layout tracking.
+        trace_limit : int, default 10
+            Maximum length of tag history.
+        normalize_override : bool, optional
+            Override normalization behavior locally.
+
+        Returns
+        -------
+        gradient : np.ndarray or torch.Tensor
+            Scharr gradient vector with shape (D, ...), tagged and formatted.
+
+        Notes
+        -----
+        - Uses `skimage.filters.scharr` under the hood (NumPy-based).
+        - For Torch inputs, the image is converted to NumPy for filtering,
+        then returned to the original device.
+        - Tagging and layout metadata are preserved via AxisTracker.
+        - Especially useful for edge detection with higher accuracy than Sobel.
         """
         from skimage.filters import scharr
         
@@ -739,19 +1001,51 @@ class DiffOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        Compute directional derivative along a given angle (2D only for now).
+        Compute the directional gradient of a 2D image along a specified angle.
+
+        Uses the dot product of the gradient vector (gx, gy) with a unit vector
+        oriented along the provided angle to extract the derivative in that direction.
 
         Parameters
         ----------
-        u : torch.Tensor | np.ndarray
-            2D input image.
-        angle : float
-            Angle in radians (0 = x-axis, pi/2 = y-axis).
+        u : np.ndarray or torch.Tensor
+            2D scalar image.
+        angle : float, default 0.0
+            Angle in radians specifying the direction of the derivative.
+            - 0   → horizontal (x-axis),
+            - π/2 → vertical (y-axis),
+            - π/4 → diagonal.
+        enable_uid : bool, default False
+            Whether to assign a UID to the output.
+        op_params : dict, optional
+            Optional metadata to embed in the output tag.
+        framework : {'torch', 'numpy'}, optional
+            Backend to use. If None, inferred automatically.
+        output_format : {'torch', 'numpy'}, optional
+            Output format.
+        track : bool, default True
+            Whether to propagate tags and layout tracking.
+        trace_limit : int, default 10
+            Maximum tag history depth.
+        normalize_override : bool, optional
+            Override normalization behavior locally.
 
         Returns
         -------
-        grad : torch.Tensor | np.ndarray
-            Directional gradient.
+        directional_gradient : np.ndarray or torch.Tensor
+            Scalar directional derivative image, tagged and formatted.
+
+        Raises
+        ------
+        NotImplementedError
+            If the input is not 2D.
+
+        Notes
+        -----
+        - Only implemented for 2D inputs.
+        - Relies on standard gradient() followed by projection onto the given angle.
+        - The angle must be expressed in **radians**.
+        - Preserves all tagging and metadata via AxisTracker.
         """
         dims = len(self._get_axes(u))
         
@@ -810,17 +1104,41 @@ class DiffOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        Compute total variation gradient approximation (ND).
+        Compute the total variation (TV) gradient approximation of an ND image.
+
+        Computes the L2-norm of the spatial gradient vector at each pixel/voxel.
+        This quantity reflects local image variations and is widely used in
+        denoising and regularization tasks.
 
         Parameters
         ----------
-        u : torch.Tensor | np.ndarray
-            Input ND image.
+        u : np.ndarray or torch.Tensor
+            Input scalar image of arbitrary dimensions.
+        enable_uid : bool, default False
+            Whether to assign a UID to the output.
+        op_params : dict, optional
+            Optional metadata to include in output tag.
+        framework : {'torch', 'numpy'}, optional
+            Backend to use. If None, inferred automatically.
+        output_format : {'torch', 'numpy'}, optional
+            Desired output format.
+        track : bool, default True
+            Whether to propagate tags and layout tracking.
+        trace_limit : int, default 10
+            Maximum depth of tag history.
+        normalize_override : bool, optional
+            Override default normalization behavior.
 
         Returns
         -------
-        tv : torch.Tensor | np.ndarray
-            Approximate total variation per pixel.
+        tv : np.ndarray or torch.Tensor
+            Per-pixel total variation (scalar map), tagged and formatted.
+
+        Notes
+        -----
+        - Computes √(∑(∂u/∂xᵢ)² + ε) per voxel (ε=1e-8 for stability).
+        - Relies internally on `gradient()` to compute spatial derivatives.
+        - Layout tracking and UID propagation are preserved via AxisTracker.
         """
         fw = framework or self.framework
         
@@ -858,17 +1176,18 @@ class DiffOperator(OperatorCore):
 
     def _get_axes(self, arr: ArrayLike) -> List[int]:
         """
-        Determine the spatial axes to apply differential operators on.
+        Determine spatial axes for applying differential operators.
 
         Parameters
         ----------
-        arr : np.ndarray | torch.Tensor
-            Input image or tensor.
+        arr : ArrayLike
+            Input array (NumPy or Torch), typically an image or volume.
 
         Returns
         -------
-        axes : list[int]
-            List of axes eligible for gradient/divergence computation.
+        List[int]
+            List of axis indices corresponding to spatial dimensions, excluding
+            batch, channel, and direction axes unless explicitly allowed.
         """
         ndim = arr.ndim
         axes = list(range(ndim))
@@ -900,23 +1219,23 @@ class DiffOperator(OperatorCore):
 
     def _get_spacing(self, n: int) -> List[float]:
         """
-        Retrieve the spacing for each spatial dimension.
+        Retrieve spacing values for each spatial dimension.
 
         Parameters
         ----------
         n : int
-            The number of spatial dimensions for which spacing is required.
+            Number of spatial dimensions (e.g., 2 for 2D, 3 for 3D).
 
         Returns
         -------
         List[float]
-            A list of spacing values, one per spatial dimension.
-            If self.spacing is None, defaults to 1.0 per dimension.
-        
+            Spacing values along each spatial axis. If `self.spacing` is None,
+            a uniform spacing of 1.0 is returned for all dimensions.
+
         Raises
         ------
         ValueError
-            If the provided spacing does not have the expected length.
+            If `self.spacing` is a list but its length does not match `n`.
         """
         # Default spacing: 1.0 for each dimension
         if self.spacing is None:
@@ -944,7 +1263,26 @@ class DiffOperator(OperatorCore):
     @torch.no_grad()
     def _get_sobel_kernels_torch(self, u: torch.Tensor, ndim: int, device: str):
         """
-        Generate Sobel kernels for each spatial axis (Torch tensors).
+        Generate Sobel kernels for each spatial axis in 2D or 3D (Torch version).
+
+        Parameters
+        ----------
+        u : torch.Tensor
+            Reference tensor used for tagging and layout propagation.
+        ndim : int
+            Number of spatial dimensions (must be 2 or 3).
+        device : str
+            Torch device to allocate the kernels on (e.g., "cpu", "cuda").
+
+        Returns
+        -------
+        List[torch.Tensor]
+            List of Sobel kernels, one per spatial axis, with proper tags.
+
+        Raises
+        ------
+        NotImplementedError
+            If `ndim` is not 2 or 3.
         """
         if ndim == 2:
             kx = torch.tensor([[1, 2, 1],
@@ -990,10 +1328,41 @@ class DiffOperator(OperatorCore):
             
         return output
     
-    def finite_difference(self, u: ArrayLike, axis: int, h: float = 1.0, mode: str | None = None, boundary: str | None = None) -> ArrayLike:
+    def finite_difference(
+        self,
+        u: ArrayLike,
+        axis: int,
+        h: float = 1.0,
+        mode: str | None = None,
+        boundary: str | None = None
+    ) -> ArrayLike:
         """
-        Finite difference operator (forward/backward/centered) with boundary handling.
-        Preserves input shape. Torch and NumPy compatible.
+        Apply a finite difference operator along a given axis with boundary handling.
+
+        Supports NumPy and PyTorch tensors. Preserves input shape.
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input array (NumPy or Torch tensor).
+        axis : int
+            Axis along which to compute the derivative.
+        h : float, optional
+            Spacing between points (default: 1.0).
+        mode : {'forward', 'backward', 'centered'}, optional
+            Type of finite difference to apply. If None, uses the default from config.
+        boundary : {'neumann', 'dirichlet', 'periodic'}, optional
+            Boundary condition strategy. If None, uses the default from config.
+
+        Returns
+        -------
+        ArrayLike
+            Array of the same shape as input `u`, containing finite differences.
+
+        Raises
+        ------
+        ValueError
+            If an unsupported `mode` or `boundary` is provided.
         """
         mode = mode or self.diff_mode.get("default")
         boundary = boundary or self.boundary_mode.get("default")
@@ -1037,9 +1406,41 @@ class DiffOperator(OperatorCore):
 
         return diff
     
-    def safe_l2_norm(self, u: ArrayLike, axis: int | None = None, eps: float = 1e-8, max_val: float = 1e10, clip_val: float = 1e5) -> ArrayLike:
+    def safe_l2_norm(
+        self,
+        u: ArrayLike,
+        axis: int | None = None,
+        eps: float = 1e-8,
+        max_val: float = 1e10,
+        clip_val: float = 1e5
+    ) -> ArrayLike:
         """
-        Compute the L2 norm of a tensor or array, with clipping and safety checks.
+        Compute the L2 norm with numerical safeguards and optional clipping.
+
+        Dispatches to the appropriate backend (NumPy or Torch) based on configuration.
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input array or tensor.
+        axis : int or None, optional
+            Axis along which to compute the norm. If None, use the flattened input.
+        eps : float, optional
+            Small constant added to prevent division by zero (default: 1e-8).
+        max_val : float, optional
+            Maximum value before clipping is enforced.
+        clip_val : float, optional
+            Value to clip the norm to, if it exceeds `max_val`.
+
+        Returns
+        -------
+        ArrayLike
+            Safe L2 norm of the input, same backend and shape as expected.
+
+        Raises
+        ------
+        NotImplementedError
+            If the selected backend is not supported.
         """
         if self.framework == "torch":
             return self.safe_l2_norm_torch(u, axis=axis, eps=eps, max_val=max_val, clip_val=clip_val)
@@ -1047,14 +1448,68 @@ class DiffOperator(OperatorCore):
             return self.safe_l2_norm_np(u, axis=axis, eps=eps, max_val=max_val, clip_val=clip_val)
     
     @staticmethod
-    def safe_l2_norm_np(u: np.ndarray, axis: int | None = None, eps: float = 1e-8, max_val: float = 1e6, clip_val: float = 1e5) -> np.ndarray:
+    def safe_l2_norm_np(
+        u: np.ndarray,
+        axis: int | None = None,
+        eps: float = 1e-8,
+        max_val: float = 1e6,
+        clip_val: float = 1e5
+    ) -> np.ndarray:
+        """
+        Compute a stable L2 norm of a NumPy array, with clipping and lower bound safeguards.
+
+        Parameters
+        ----------
+        u : np.ndarray
+            Input array.
+        axis : int or None, optional
+            Axis along which to compute the norm. If None, the norm is computed over the entire array.
+        eps : float, optional
+            Minimum squared norm value to avoid sqrt(0) (default: 1e-8).
+        max_val : float, optional
+            Maximum squared norm value before clamping (default: 1e6).
+        clip_val : float, optional
+            Absolute value used to clip the input tensor before norm computation (default: 1e5).
+
+        Returns
+        -------
+        np.ndarray
+            Stable L2 norm with the same shape as `u` minus the reduced axis.
+        """
         u_clipped = np.clip(u, -clip_val, clip_val)
         norm_sq = np.sum(u_clipped** 2, axis=axis)
         norm_sq = np.clip(norm_sq, eps, max_val)
         return np.sqrt(norm_sq)
     
     @staticmethod
-    def safe_l2_norm_torch(u: torch.Tensor, axis: int | None = None, eps: float = 1e-8, max_val: float = 1e6, clip_val: float = 1e5) -> torch.Tensor:
+    def safe_l2_norm_torch(
+        u: torch.Tensor,
+        axis: int | None = None,
+        eps: float = 1e-8,
+        max_val: float = 1e6,
+        clip_val: float = 1e5
+    ) -> torch.Tensor:
+        """
+        Compute a stable L2 norm of a Torch tensor, with clipping and safety bounds.
+
+        Parameters
+        ----------
+        u : torch.Tensor
+            Input tensor.
+        axis : int or None, optional
+            Axis along which to compute the norm. If None, the norm is computed over all elements.
+        eps : float, optional
+            Minimum squared norm value to prevent sqrt(0) (default: 1e-8).
+        max_val : float, optional
+            Maximum squared norm value before clamping (default: 1e6).
+        clip_val : float, optional
+            Value used to clamp input values before norm computation (default: 1e5).
+
+        Returns
+        -------
+        torch.Tensor
+            Stable L2 norm with the same shape as `u` minus the reduced axis.
+        """
         u_clipped = torch.clamp(u, min=-clip_val, max=clip_val)
         norm_sq = torch.sum(u_clipped** 2, dim=axis)
         norm_sq = torch.clamp(norm_sq, min=eps, max=max_val)
@@ -1066,18 +1521,21 @@ class DiffOperator(OperatorCore):
     @torch.no_grad()
     def _gradient_torch(self, u: torch.Tensor) -> torch.Tensor:
         """
-        Compute the ND gradient of a torch tensor using finite differences.
-        Applies correct boundary condition and ND axis handling.
+        Compute the N-dimensional gradient of a Torch tensor using finite differences.
+
+        Applies spacing-aware finite differences along spatial axes, with support
+        for boundary conditions and layout-aware tagging.
 
         Parameters
         ----------
         u : torch.Tensor
-            ND tensor, tracked or raw.
+            Input tensor, either raw or tracked with axis metadata.
 
         Returns
         -------
-        grad : torch.Tensor
-            ND gradient, shape = [D, ...]
+        torch.Tensor
+            Stacked gradient tensor with shape [D, ...], where D is the number
+            of spatial axes. Layout tags and metadata are preserved.
         """
         axes = self._get_axes(u)
         spacing = self._get_spacing(len(axes))
@@ -1106,23 +1564,25 @@ class DiffOperator(OperatorCore):
 
     @torch.no_grad()
     def _divergence_torch(self, v: torch.Tensor, weight: torch.Tensor | None = None) -> torch.Tensor:
-
         """
-        Compute the ND divergence of a torch vector field (D, ...).
-        Handles boundary conditions and spacing.
+        Compute the N-dimensional divergence of a Torch vector field using finite differences.
+
+        Supports spatial weighting, optional flux clipping, and layout-aware metadata tracking.
+        Handles boundary conditions and spacing along each spatial axis.
 
         Parameters
         ----------
         v : torch.Tensor
-            Stacked vector field, where axis 0 = direction_axis.
-            
-        weight : torch.Tensor | None
-            Optional weights for each direction.
+            Input vector field, stacked along axis 0 (shape: [D, ...]), where D is the number
+            of spatial directions.
+        weight : torch.Tensor or None, optional
+            Optional per-direction weighting tensor (same shape as `v`).
 
         Returns
         -------
-        div : torch.Tensor
-            ND scalar field.
+        torch.Tensor
+            Divergence scalar field with same shape as a single vector component.
+            Includes updated layout and tag metadata.
         """
         tagger = self.track(v)
         axes = self._get_axes(v)
@@ -1155,10 +1615,36 @@ class DiffOperator(OperatorCore):
         return tracker.get()
     
     @torch.no_grad()
-    def _sobel_torch(self, u: torch.Tensor, gradient: bool = False, normalize: bool = True, scale_factor: float | None = 15
-    ) -> torch.Tensor:  
+    def _sobel_torch(
+        self,
+        u: torch.Tensor,
+        gradient: bool = False,
+        normalize: bool = True,
+        scale_factor: float | None = 15
+    ) -> torch.Tensor:
         """
-        Compute Sobel gradient magnitude (Torch backend).
+        Compute the Sobel gradient magnitude or full gradient field of a Torch tensor.
+
+        Applies dimension-aware Sobel filtering using convolution. Supports optional
+        normalization and ND gradient output with tag propagation.
+
+        Parameters
+        ----------
+        u : torch.Tensor
+            Input image or volume (tracked or raw).
+        gradient : bool, optional
+            If True, return the full ND gradient as a stacked tensor [D, ...].
+            If False (default), return the scalar gradient magnitude.
+        normalize : bool, optional
+            Whether to normalize the gradient magnitude (default: True).
+        scale_factor : float or None, optional
+            Scale to apply after normalization (default: 15). Ignored if normalize is False.
+
+        Returns
+        -------
+        torch.Tensor
+            Sobel-filtered output, either a scalar gradient magnitude or
+            a stacked tensor of per-axis gradients with full tagging support.
         """
         from operators.gaussian import NDConvolver as convolver
         
@@ -1208,8 +1694,27 @@ class DiffOperator(OperatorCore):
     @torch.no_grad()
     def _hessian_torch(self, u: torch.Tensor) -> torch.Tensor:
         """
-        Compute ND Hessian using Torch finite differences.
-        Returns a Hessian tensor of shape [D, D, ...].
+        Compute the N-dimensional Hessian matrix of a Torch tensor using finite differences.
+
+        Uses second-order partial derivatives computed via repeated finite difference
+        operations along each pair of spatial axes.
+
+        Parameters
+        ----------
+        u : torch.Tensor
+            Input tensor (tracked or raw), representing a scalar field.
+
+        Returns
+        -------
+        torch.Tensor
+            Hessian tensor of shape [D, D, ...], where D is the number of spatial axes.
+            Layout tags are updated accordingly, with direction axes set to (0, 1).
+
+        Notes
+        -----
+        - Handles spacing and boundary conditions based on config.
+        - Gradient mode is used for both partial derivatives.
+        - Output preserves tagging and layout semantics via tracker propagation.
         """
         tagger = self.track(u)
         axes = self._get_axes(u)
@@ -1248,11 +1753,39 @@ class DiffOperator(OperatorCore):
         return tracker.get()
     
     @torch.no_grad()
-    def _sobel_hessian_torch(self, u: torch.Tensor, normalize: bool = True, scale_factor: float | None = 15) -> torch.Tensor:
-
+    def _sobel_hessian_torch(
+        self,
+        u: torch.Tensor,
+        normalize: bool = True,
+        scale_factor: float | None = 15
+    ) -> torch.Tensor:
         """
-        Compute the ND Sobel Hessian matrix (second derivatives) using torch backend and NDConvolver.
-        Output shape: [D, D, ...]
+        Compute the N-dimensional Hessian matrix using Sobel filters and Torch backend.
+
+        Applies two successive Sobel convolutions along each pair of spatial axes
+        to estimate second-order derivatives. Optionally normalizes the Hessian
+        components to a fixed scale.
+
+        Parameters
+        ----------
+        u : torch.Tensor
+            Input tensor (2D or 3D), raw or tracked.
+        normalize : bool, optional
+            Whether to normalize the Hessian values (default: True).
+        scale_factor : float or None, optional
+            Target range for normalization (default: 15). Ignored if `normalize` is False.
+
+        Returns
+        -------
+        torch.Tensor
+            Hessian tensor of shape [D, D, ...], where D is the number of spatial axes.
+            Includes full tagging and layout metadata.
+
+        Notes
+        -----
+        - Uses Sobel kernels generated with `_get_sobel_kernels_torch`.
+        - Convolution performed using `NDConvolver`.
+        - Result is layout-aware and includes 'direction_axis': (0, 1).
         """
         tagger = self.track(u)
         device = u.device
@@ -1309,18 +1842,26 @@ class DiffOperator(OperatorCore):
 # ==================================================
     def _gradient_numpy(self, u: np.ndarray) -> np.ndarray:
         """
-        Compute the ND gradient using NumPy finite differences.
-        Supports spacing and boundary conditions. Fully ND-aware.
+        Compute the N-dimensional gradient of a NumPy array using finite differences.
+
+        Applies spacing-aware finite differences along spatial axes, with support
+        for boundary conditions and layout-aware tagging.
 
         Parameters
         ----------
         u : np.ndarray
-            ND array to differentiate.
+            Input ND array representing a scalar field.
 
         Returns
         -------
-        grad : np.ndarray
-            Stacked gradient array with shape [D, ...]
+        np.ndarray
+            Stacked gradient array of shape [D, ...], where D is the number of spatial axes.
+            Includes tag propagation with updated layout and metadata.
+
+        Notes
+        -----
+        - Input is converted to float32 before computation for consistency.
+        - Tag tracking is preserved and updated automatically.
         """
         tagger = self.track(u)
         u = tagger.apply_to_all(np.asarray, dtype=np.float32).get() # Convert to float32 safely (across all slices)
@@ -1349,23 +1890,31 @@ class DiffOperator(OperatorCore):
         }).get()
 
     def _divergence_numpy(self, v: np.ndarray, weight: np.ndarray | None = None) -> np.ndarray:
-
         """
-        Compute the ND divergence using NumPy finite differences.
-        Input must be a stacked vector field with shape [D, ...].
+        Compute the N-dimensional divergence of a NumPy vector field using finite differences.
+
+        Uses per-axis gradients with optional spatial weighting and flux clipping.
+        Handles boundary conditions and spacing along each spatial direction.
 
         Parameters
         ----------
         v : np.ndarray
-            ND vector field with direction_axis = 0.
-            
-        weight : np.ndarray | None
-            ND weight array with shape [D, ...].
+            Input vector field with shape [D, ...], where D is the number of spatial axes.
+            Axis 0 must correspond to the direction_axis.
+        weight : np.ndarray or None, optional
+            Optional weight array of the same shape as `v`.
 
         Returns
         -------
-        div : np.ndarray
-            Scalar ND divergence output.
+        np.ndarray
+            Scalar divergence field with same spatial shape as a single vector component.
+            Includes updated tags and layout metadata.
+
+        Notes
+        -----
+        - Input is cast to float32 before processing.
+        - Tagging and axis layout are preserved and updated automatically.
+        - Uses config-defined spacing, finite difference mode, and boundary policy.
         """
         tagger = self.track(v)
         v = tagger.apply_to_all(np.asarray, dtype=np.float32).get() # Ensure float32 (across all slices)
@@ -1401,7 +1950,31 @@ class DiffOperator(OperatorCore):
 
     def _sobel_numpy(self, u: np.ndarray, gradient: bool = False) -> np.ndarray:
         """
-        Compute Sobel gradient magnitude (NumPy backend).
+        Compute the N-dimensional Sobel gradient (NumPy backend).
+
+        Applies 1D Sobel filters along each spatial axis and returns either the
+        scalar gradient magnitude or the full ND gradient field. Preserves layout
+        and tagging metadata.
+
+        Parameters
+        ----------
+        u : np.ndarray
+            Input ND image or volume (tracked or raw).
+        gradient : bool, optional
+            If True, returns the full stacked gradient field [D, ...].
+            If False (default), returns scalar gradient magnitude.
+
+        Returns
+        -------
+        np.ndarray
+            Either a scalar gradient magnitude or a stacked gradient array with shape [D, ...],
+            including layout-aware tags and metadata.
+
+        Notes
+        -----
+        - Uses `scipy.ndimage.sobel` along each spatial axis.
+        - Adds epsilon (1e-8) to prevent sqrt(0) during magnitude computation.
+        - Tagging and layout handling are consistent with other ND methods.
         """
         # === Tagging ND auto via layout ===
         tagger = self.track(u)
@@ -1431,10 +2004,28 @@ class DiffOperator(OperatorCore):
         }).get()
         
     def _hessian_numpy(self, u: np.ndarray) -> np.ndarray:
-        
         """
-        Compute ND Hessian using NumPy finite differences.
-        Returns a Hessian tensor of shape [D, D, ...].
+        Compute the N-dimensional Hessian matrix using NumPy finite differences.
+
+        Applies two successive partial derivatives along each pair of spatial axes
+        using spacing-aware finite differences and boundary handling.
+
+        Parameters
+        ----------
+        u : np.ndarray
+            Input scalar field (2D or ND NumPy array, tracked or raw).
+
+        Returns
+        -------
+        np.ndarray
+            Hessian tensor of shape [D, D, ...], where D is the number of spatial axes.
+            Includes updated tags and layout metadata with 'direction_axis': (0, 1).
+
+        Notes
+        -----
+        - Input is safely cast to float32.
+        - Tagging and layout handling are preserved via tracker logic.
+        - Uses config-defined finite difference and boundary modes.
         """
         
         tagger = self.track(u)
@@ -1476,7 +2067,27 @@ class DiffOperator(OperatorCore):
     
     def _sobel_hessian_numpy(self, u: np.ndarray) -> np.ndarray:
         """
-        Compute ND Hessian using Sobel second-order derivatives in NumPy.
+        Compute the N-dimensional Hessian matrix using Sobel filters (NumPy backend).
+
+        Applies two successive Sobel operations along each pair of spatial axes
+        to estimate second-order partial derivatives.
+
+        Parameters
+        ----------
+        u : np.ndarray
+            Input scalar field (ND array, tracked or raw).
+
+        Returns
+        -------
+        np.ndarray
+            Hessian tensor of shape [D, D, ...], where D is the number of spatial axes.
+            Includes updated layout and tagging metadata with 'direction_axis': (0, 1).
+
+        Notes
+        -----
+        - Uses `scipy.ndimage.sobel` with 'reflect' mode.
+        - Result includes auto-tagging and layout propagation.
+        - No normalization or scaling is applied.
         """
         tagger = self.track(u)
         axes = self._get_axes(u)
@@ -1516,18 +2127,27 @@ class DiffOperator(OperatorCore):
 
     def _gradient_numpy_parallel(self, u: np.ndarray) -> np.ndarray:
         """
-        Compute ND gradient using NumPy + joblib parallelism.
-        Supports spacing and boundary handling.
+        Compute the N-dimensional gradient of a NumPy array using joblib-based parallelism.
+
+        Applies finite difference operations along each spatial axis in parallel,
+        using spacing and boundary conditions defined in the configuration.
 
         Parameters
         ----------
         u : np.ndarray
-            ND input image.
+            Input scalar field (ND array, tracked or raw).
 
         Returns
         -------
-        grad : np.ndarray
-            Gradient stacked on axis 0.
+        np.ndarray
+            Stacked gradient array of shape [D, ...], where D is the number of spatial axes.
+            Includes updated layout and tagging metadata.
+
+        Notes
+        -----
+        - Uses `joblib.Parallel` for parallel axis-wise computation.
+        - Input is cast to float32 before processing.
+        - Layout and tags are automatically propagated.
         """
         tagger = self.track(u)
         u = tagger.apply_to_all(np.asarray, dtype=np.float32).get()
@@ -1553,23 +2173,31 @@ class DiffOperator(OperatorCore):
         }).get()
 
     def _divergence_numpy_parallel(self, v: np.ndarray, weight: np.ndarray | None = None) -> np.ndarray:
-
         """
-        Compute ND divergence using NumPy + joblib parallelism.
-        Vector field must be stacked on axis 0.
+        Compute the N-dimensional divergence of a NumPy vector field using joblib-based parallelism.
+
+        Applies finite difference operations along each spatial axis in parallel,
+        with optional per-direction weighting and maximum flux clipping.
 
         Parameters
         ----------
         v : np.ndarray
-            Vector field with shape [D, ...].
-            
-        weight : np.ndarray | None
-            Optional weights for each direction.
+            Input vector field of shape [D, ...], where D is the number of spatial axes.
+            Axis 0 corresponds to the direction_axis.
+        weight : np.ndarray or None, optional
+            Optional per-direction weight array (same shape as `v`).
 
         Returns
         -------
-        div : np.ndarray
-            Scalar field after divergence.
+        np.ndarray
+            Scalar divergence field with same spatial shape as a single vector component.
+            Includes updated layout and tagging metadata.
+
+        Notes
+        -----
+        - Uses `joblib.Parallel` to compute per-axis divergence terms concurrently.
+        - Supports spacing and boundary modes as defined in config.
+        - Tags and layout are propagated from the input field.
         """
         tagger = self.track(v)
         v = tagger.apply_to_all(np.asarray, dtype=np.float32).get()
@@ -1604,8 +2232,27 @@ class DiffOperator(OperatorCore):
     
     def _hessian_numpy_parallel(self, u: np.ndarray) -> np.ndarray:
         """
-        Compute ND Hessian using NumPy + joblib parallelism.
-        Returns a Hessian tensor of shape [D, D, ...].
+        Compute the N-dimensional Hessian matrix using NumPy with joblib-based parallelism.
+
+        Applies two successive finite difference operations for each pair of spatial axes
+        in parallel, using spacing and boundary rules from config.
+
+        Parameters
+        ----------
+        u : np.ndarray
+            Input scalar field (ND array), raw or tracked.
+
+        Returns
+        -------
+        np.ndarray
+            Hessian tensor of shape [D, D, ...], where D is the number of spatial axes.
+            Includes updated tags and layout metadata, with 'direction_axis': (0, 1).
+
+        Notes
+        -----
+        - Uses `joblib.Parallel` to compute each second-order derivative in parallel.
+        - Preserves tags and ND layout using tracker logic.
+        - Input is cast to float32 before processing.
         """
         tagger = self.track(u)
         u = tagger.apply_to_all(np.asarray, dtype=np.float32).get()
@@ -1655,18 +2302,27 @@ class DiffOperator(OperatorCore):
 
     def _gradient_numpy_classic(self, u: np.ndarray) -> np.ndarray:
         """
-        Compute the ND gradient using classic slicing (non-vectorized).
-        Supports spacing and boundary conditions.
+        Compute the N-dimensional gradient using classic NumPy slicing (non-vectorized).
+
+        Applies spacing-aware finite differences along each spatial axis using
+        standard slicing operations, without vectorized backends or joblib parallelism.
 
         Parameters
         ----------
         u : np.ndarray
-            ND input image.
+            Input ND array representing a scalar field (tracked or raw).
 
         Returns
         -------
-        grad : np.ndarray
-            Stacked gradients with shape [D, ...].
+        np.ndarray
+            Stacked gradient array of shape [D, ...], where D is the number of spatial axes.
+            Includes updated layout and tagging metadata.
+
+        Notes
+        -----
+        - Intended as a simple and readable baseline implementation.
+        - Supports spacing and boundary modes as defined in config.
+        - Uses layout-aware tagging via tracker logic.
         """
         tagger = self.track(u)
         u = tagger.apply_to_all(np.asarray, dtype=np.float32).get()
@@ -1697,21 +2353,31 @@ class DiffOperator(OperatorCore):
 
     def _divergence_numpy_classic(self, v: np.ndarray, weight: np.ndarray | None = None) -> np.ndarray:
         """
-        Compute ND divergence using classic slicing (non-vectorized).
+        Compute the N-dimensional divergence using classic NumPy slicing (non-vectorized).
+
+        Computes the divergence from a stacked vector field using sequential
+        finite differences along each spatial axis. Intended as a simple baseline
+        without vectorization or parallelism.
 
         Parameters
         ----------
         v : np.ndarray
-            Vector field of shape [D, ...] (direction_axis=0).
-        
-        weight : np.ndarray | None
-            Optional weights for each direction.
+            Input vector field of shape [D, ...], where D is the number of spatial axes.
+            Axis 0 must be the direction_axis.
+        weight : np.ndarray or None, optional
+            Optional per-direction weights. If provided, applied before differentiation.
 
         Returns
         -------
-        div : np.ndarray
-            Scalar field after divergence.
-        
+        np.ndarray
+            Scalar divergence field with same spatial shape as a single vector component.
+            Includes updated layout and tagging metadata.
+
+        Notes
+        -----
+        - Input is safely cast to float32.
+        - Spacing, boundary mode, and clipping are applied per axis.
+        - Uses tracker logic to maintain ND metadata and layout consistency.
         """
         tagger = self.track(v)
         v = tagger.apply_to_all(np.asarray, dtype=np.float32).get()
@@ -1745,10 +2411,28 @@ class DiffOperator(OperatorCore):
     
     def _hessian_numpy_classic(self, u: np.ndarray) -> np.ndarray:
         """
-        Compute ND Hessian using nested loops.
-        Fully ND-aware, independent of gradient().
+        Compute the N-dimensional Hessian matrix using classic nested finite difference loops.
 
-        Returns a Hessian tensor of shape [D, D, ...].
+        Computes all second-order partial derivatives via two successive directional
+        finite differences, without relying on external gradient calls. This method
+        serves as a baseline implementation that is fully ND-aware.
+
+        Parameters
+        ----------
+        u : np.ndarray
+            Input scalar field (ND array), tracked or raw.
+
+        Returns
+        -------
+        np.ndarray
+            Hessian tensor of shape [D, D, ...], where D is the number of spatial axes.
+            Includes updated tagging and layout metadata, with 'direction_axis': (0, 1).
+
+        Notes
+        -----
+        - Uses simple nested loops instead of vectorized or parallel computation.
+        - Applies spacing and boundary conditions per axis.
+        - Preserves layout and ND metadata through tracker propagation.
         """
         tagger = self.track(u)
         u = tagger.apply_to_all(np.asarray, dtype=np.float32).get()
@@ -1794,37 +2478,56 @@ class DiffOperator(OperatorCore):
 # ======================================================================
 
 def diffop(
-        img: ArrayLike,
-        func: str = "gradient",
-        diff_strategy: str = "vectorized",
-        framework: Framework = "numpy",
-        output_format: Framework = "numpy",
-        layout_name: str = "HWC",
-        layout_framework: Framework = "numpy",
-        backend: str = "sequential",
-        ):
+    img: ArrayLike,
+    func: str = "gradient",
+    diff_strategy: str = "vectorized",
+    framework: Framework = "numpy",
+    output_format: Framework = "numpy",
+    layout_name: str = "HWC",
+    layout_framework: Framework = "numpy",
+    backend: str = "sequential",
+):
     """
-    Convenience wrapper to build and run a DiffOperator instance.
+    Universal wrapper to configure and apply a DiffOperator method on a given image.
+
+    Allows dynamic selection of differentiation method, backend strategy,
+    layout handling, and output format.
+
     Parameters
     ----------
     img : ArrayLike
-        Input image.
+        Input image or volume (NumPy or Torch array).
     func : str, optional
-        Method to call on DiffOperator. Options: "gradient", "divergence", "    hessian", "sobel", "sobel_hessian".
+        Name of the method to call on the DiffOperator instance.
+        Options: "gradient", "divergence", "hessian", "sobel", "sobel_hessian".
         Default is "gradient".
     diff_strategy : str, optional
-        Differentiation strategy. Options: "vectorized", "torch", "numpy". Default is "vectorized".
-    framework : str, optional
-        Framework to use. Options: "numpy", "torch". Default is "numpy".
-    output_format : str, optional
-        Output format. Options: "numpy", "torch". Default is "numpy".
+        Differentiation backend strategy.
+        Options: "vectorized", "torch", "numpy", "parallel", "classic".
+        Default is "vectorized".
+    framework : {"numpy", "torch"}, optional
+        Framework used to process the image and execute operations.
+        Default is "numpy".
+    output_format : {"numpy", "torch"}, optional
+        Format of the returned result. Default is "numpy".
     layout_name : str, optional
-        Layout name. Default is "HWC".
-    layout_framework : str, optional        
-        Layout framework. Default is "numpy".
-    backend : str, optional
-        Backend to use. Options: "sequential", "parallel". Default is "sequential".
-    """    
+        Layout string describing axis order (e.g., "HWC", "ZYX"). Default is "HWC".
+    layout_framework : {"numpy", "torch"}, optional
+        Framework used to resolve layout conventions. Default is "numpy".
+    backend : {"sequential", "parallel"}, optional
+        Execution mode for NumPy processing. Default is "sequential".
+
+    Returns
+    -------
+    ArrayLike
+        Output of the requested operation, formatted according to the selected framework
+        and output_format. Includes updated tags and layout metadata if supported.
+
+    Raises
+    ------
+    ValueError
+        If the requested method does not exist in the DiffOperator instance.
+    """ 
     # ====[ Fallback ]====
     diff_strategy=diff_strategy or "vectorized" if framework == "numpy" else "torch"
     

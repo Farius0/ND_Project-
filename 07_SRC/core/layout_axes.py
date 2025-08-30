@@ -622,7 +622,23 @@ def infer_layout(image: Any, framework: str = "auto") -> str:
 
 
 def get_axis_name_by_index(framework: str, layout_name: str, index: int) -> Optional[str]:
-    """Return the axis field name for a given index in a framework+layout."""
+    """
+    Return the semantic axis name corresponding to a given index in the layout.
+
+    Parameters
+    ----------
+    framework : str
+        Framework to use for layout resolution ('numpy' or 'torch').
+    layout_name : str
+        Layout string (e.g., 'HWC', 'NCHW', etc.).
+    index : int
+        Axis index to look up.
+
+    Returns
+    -------
+    str or None
+        Semantic axis name (e.g., 'height_axis', 'channel_axis'), or None if not found.
+    """
     layout = get_layout_axes(framework, layout_name)
     for key in AXES_ORDER:
         if layout.get(key) == index:
@@ -631,7 +647,22 @@ def get_axis_name_by_index(framework: str, layout_name: str, index: int) -> Opti
 
 
 def get_axes_positions(framework: str, layout_name: str) -> Dict[str, int]:
-    """Return a dict of defined axis positions (excluding None)."""
+    """
+    Return a dictionary mapping semantic axis names to their positions for a given layout.
+
+    Parameters
+    ----------
+    framework : str
+        Framework used to resolve the layout ('numpy' or 'torch').
+    layout_name : str
+        Layout string to interpret (e.g., 'HWC', 'NCHW', etc.).
+
+    Returns
+    -------
+    Dict[str, int]
+        Dictionary of axis names (e.g., 'height_axis') and their corresponding indices,
+        excluding any undefined (None) axes.
+    """
     layout = get_layout_axes(framework, layout_name)
     return {k: v for k, v in layout.items() if k in AXES_ORDER and v is not None}
 
@@ -670,7 +701,21 @@ def get_layout_from_axes(
 
 
 def summarize_layout(framework: str, layout_name: str) -> None:
-    """Pretty-print a human-readable summary of layout axes and structure."""
+    """
+    Pretty-print a human-readable summary of axis roles and their positions in the layout.
+
+    Parameters
+    ----------
+    framework : str
+        Framework used for layout interpretation ('numpy' or 'torch').
+    layout_name : str
+        Layout string to summarize (e.g., 'HWC', 'NCHW').
+
+    Returns
+    -------
+    None
+        The function prints the layout summary to stdout.
+    """
     layout = get_layout_axes(framework, layout_name)
     print(f"\n[Layout: '{layout_name}' – Framework: {framework}]")
     for key in sorted(layout.keys()):
@@ -680,7 +725,19 @@ def summarize_layout(framework: str, layout_name: str) -> None:
 
 
 def validate_layout_dict(layout: Dict[str, Any]) -> None:
-    """Validate structure and values of a layout definition."""
+    """
+    Validate that the layout dictionary is structurally correct and contains valid axis mappings.
+
+    Parameters
+    ----------
+    layout : Dict[str, Any]
+        Dictionary defining axis names and their corresponding indices.
+
+    Returns
+    -------
+    None
+        Raises a ValueError or TypeError if the layout is invalid.
+    """
     if "ndim" not in layout:
         raise ValueError("Missing 'ndim' in layout definition.")
     for axis in AXES_ORDER:
@@ -716,11 +773,34 @@ class LayoutResolver:
         """
         Build a layout string based on axis presence and preferred channel position.
 
+        Parameters
+        ----------
+        direction : bool, optional
+            Whether to include a direction axis ('D').
+        batch : bool, optional
+            Whether to include a batch axis ('N').
+        channel : bool, optional
+            Whether to include a channel axis ('C').
+        depth : bool, optional
+            Whether to include a depth axis ('Z') for 3D data.
+        height : bool, optional
+            Whether to include a height axis ('H').
+        width : bool, optional
+            Whether to include a width axis ('W').
+        channel_position : {'first', 'last'}, optional
+            Placement of the channel axis: 'first' (e.g., 'CHW') or 'last' (e.g., 'HWC').
+
+        Returns
+        -------
+        str
+            Constructed layout string based on the specified flags.
+
         Notes
         -----
-        - 'channel_position' controls whether 'C' is placed before ('first') or
-          after spatial axes ('last').
+        - The channel axis ('C') is placed according to `channel_position`.
+        - Axes are added in the order: batch, direction, spatial, channel.
         """
+
         order: List[str] = []
 
         if direction:
@@ -745,14 +825,26 @@ class LayoutResolver:
     @classmethod
     def to_axes_dict(cls, layout_str: str, strict: bool = True) -> Dict[str, int]:
         """
-        Convert a layout string (e.g., 'NCHW') into an axes dictionary.
+        Convert a layout string (e.g., 'NCHW') into a dictionary mapping axis roles to indices.
+
+        Parameters
+        ----------
+        layout_str : str
+            Layout string where each character represents an axis (e.g., 'N' = batch, 'C' = channel).
+        strict : bool, optional
+            If True, raises an error on unknown characters or duplicated roles.
+
+        Returns
+        -------
+        Dict[str, int]
+            Dictionary mapping semantic axis names (e.g., 'batch_axis', 'channel_axis') to positions.
 
         Raises
         ------
         ValueError
-            If an unknown character is encountered or roles are duplicated
-            (when strict=True).
+            If an unknown character is found or roles are duplicated (when strict=True).
         """
+
         axis_roles = {
             "G": "direction_axis",
             "N": "batch_axis",
@@ -780,7 +872,27 @@ class LayoutResolver:
 
     @classmethod
     def to_flag_dict(cls, layout_str: str, strict: bool = True) -> Dict[str, bool]:
-        """Convert a layout string to boolean presence flags for each axis."""
+        """
+        Convert a layout string (e.g., 'NCHW') into a dictionary of axis presence flags.
+
+        Parameters
+        ----------
+        layout_str : str
+            Layout string where each character represents a semantic axis (e.g., 'N' for batch).
+        strict : bool, optional
+            If True, raises an error for unknown or duplicated characters.
+
+        Returns
+        -------
+        Dict[str, bool]
+            Dictionary indicating the presence (True/False) of each axis role:
+            {'batch': True, 'channel': True, 'height': True, 'width': True, ...}
+
+        Raises
+        ------
+        ValueError
+            If unknown or duplicated axis characters are encountered (when strict=True).
+        """
         role_flags = {
             "G": "direction",
             "N": "batch",
@@ -805,12 +917,21 @@ class LayoutResolver:
     @classmethod
     def describe_layout(cls, layout_str: str, as_string: bool = False, strict: bool = True) -> Optional[str]:
         """
-        Print or return a summary of the layout string's axes and flags.
+        Print or return a human-readable summary of a layout string and its axis roles.
+
+        Parameters
+        ----------
+        layout_str : str
+            Layout string to describe (e.g., 'NCHW').
+        as_string : bool, optional
+            If True, return the summary as a string instead of printing it.
+        strict : bool, optional
+            If True, enforce strict validation of the layout string.
 
         Returns
         -------
-        str | None
-            Summary string when as_string=True; otherwise None.
+        str or None
+            Summary string if `as_string=True`; otherwise None (output is printed).
         """
         try:
             axes = cls.to_axes_dict(layout_str, strict=strict)
@@ -836,19 +957,30 @@ class LayoutResolver:
     @staticmethod
     def guess_from_shape(shape: Tuple[int, ...], strict: bool = True) -> str:
         """
-        Guess a layout string from `shape` (heuristics; may be ambiguous).
+        Heuristically guess a layout string (e.g., 'HWC', 'NCHW') from a shape tuple.
+
+        Parameters
+        ----------
+        shape : Tuple[int, ...]
+            Shape of the array or tensor to analyze.
+        strict : bool, optional
+            If True, raises an error when no valid layout can be guessed.
+
+        Returns
+        -------
+        str
+            Guessed layout string based on the number and size of dimensions.
 
         Notes
         -----
-        - Heuristics prefer common image shapes (RGB/A channels as 1/3/4).
-        - 4D falls back to 'NCHW'/'NHWC' when plausible, else 'CDHW'.
-        - For ambiguous 5D, returns 'GNCHW'/'GNHWC' when channel-like dims found,
-          else 'NDHWC'.
+        - Prefers common image conventions (e.g., 1/3/4-channel formats).
+        - 4D shapes fall back to 'NCHW' or 'NHWC' when plausible; otherwise 'CDHW'.
+        - 5D shapes may return 'GNCHW'/'GNHWC' for grouped inputs, or 'NDHWC'.
 
         Raises
         ------
         ValueError
-            If no guess is possible and strict=True.
+            If no reasonable layout can be inferred and strict=True.
         """
         ndim = len(shape)
 

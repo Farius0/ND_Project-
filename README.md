@@ -8,7 +8,7 @@ It is designed to be modular, extendable, and compatible with PyTorch and NumPy,
 ## Project Structure
 
 ```
-(see detailed tree structure in documentation)
+(see detailed tree structure in folder "07_SRC")
 
 ```
 

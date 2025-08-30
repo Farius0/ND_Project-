@@ -22,21 +22,21 @@ __all__ = ["Operator", "DeepOperator", "clip_image", "operator"]
 # ====[ Clip image between 0 and 1 if required ]====
 def clip_image(img: ArrayLike, framework: Framework, enabled: bool = True) -> ArrayLike:
     """
-    Clip the image/tensor to [0, 1] if `enabled=True`.
+    Clip an image or tensor to the [0, 1] range if enabled.
 
     Parameters
     ----------
-    img : ndarray | Tensor
-        Input image.
-    framework : {'numpy','torch'}
-        Backend flag to choose the proper clipping op.
+    img : ndarray or Tensor
+        Input image. Can also be AxisTracker-compatible (with `.get()` method).
+    framework : {'numpy', 'torch'}
+        Backend to use for clipping operation.
     enabled : bool, default True
-        Whether to clip.
+        If False, returns the input unchanged.
 
     Returns
     -------
-    ndarray | Tensor
-        Clipped image/tensor or original if disabled.
+    ndarray or Tensor
+        Clipped image/tensor if enabled; otherwise the original input.
     """
     if not enabled:
         return img
@@ -52,14 +52,16 @@ def clip_image(img: ArrayLike, framework: Framework, enabled: bool = True) -> Ar
 # ====[ Operator: Classical Degradation Simulator ]====
 class Operator(OperatorCore):
     """
-    Classical degradation operators: noise, blur, inpaint.
-    Inherits from OperatorCore for conversion, tagging and output formatting.
+    Classical image degradation operators: noise, blur, and inpainting.
+
+    Inherits from OperatorCore to provide layout-aware processing, axis tagging,
+    and dual-backend support (NumPy and Torch).
 
     Notes
     -----
-    - Dual-backend: keeps NumPy↔Torch symmetry.
-    - ND-ready: 2D/3D first-class; higher D when meaningful.
-    - Layout-aware tagging through OperatorCore facilities.
+    - Dual-backend ready: consistent behavior with NumPy and Torch inputs.
+    - ND-aware: supports 2D and 3D natively; higher dimensions when meaningful.
+    - Preserves and updates layout metadata using OperatorCore facilities.
     """
 
     def __init__(
@@ -70,18 +72,18 @@ class Operator(OperatorCore):
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
         """
-        Initialize the classical operator wrapper.
+        Initialize the classical operator wrapper with layout and backend configuration.
 
         Parameters
         ----------
-        image : ndarray | Tensor
-            Input image/volume.
+        image : ndarray or Tensor
+            Input image or volume to process.
         clip : bool, default False
-            Clip outputs to [0, 1] when True.
+            If True, output is clipped to the [0, 1] range after processing.
         layout_cfg : LayoutConfig
-            Axis/layout configuration.
+            Configuration for interpreting and tracking axis layout.
         global_cfg : GlobalConfig
-            Global behavior (framework, output_format, device, etc.).
+            Configuration for backend selection, output format, and device behavior.
         """  
         # ====[ Configuration ]====
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -133,17 +135,31 @@ class Operator(OperatorCore):
     # ====[ Apply noise degradation ]====
     def noise(self, sigma: float = 0.2) -> ArrayLike:
         """
-        Apply additive Gaussian noise to the input image.
+        Apply additive Gaussian noise to the input image or volume.
+
+        The degraded image is automatically tagged, layout-tracked,
+        and clipped to [0, 1] if `self.clip` is enabled.
 
         Parameters
         ----------
-        sigma : float
-            Standard deviation of the Gaussian noise.
+        sigma : float, default 0.2
+            Standard deviation of the Gaussian noise. Must be strictly positive.
 
         Returns
         -------
-        noised : np.ndarray | torch.Tensor
-            Noised image, tagged and optionally clipped.
+        ArrayLike
+            Noised image or volume (NumPy or Torch), with layout and UID tagging.
+
+        Raises
+        ------
+        ValueError
+            If `sigma` is not strictly positive.
+
+        Notes
+        -----
+        - The operation preserves shape and dtype.
+        - The output is tagged with status='noised' and includes axis layout info.
+        - Uses the configured backend (`self.framework`) and clipping policy (`self.clip`).
         """
         if sigma <= 0:
             raise ValueError("Sigma must be positive.")
@@ -177,21 +193,36 @@ class Operator(OperatorCore):
     # ====[ Apply spatial blur degradation ]====
     def blur(self, sigma: float = 1.0, return_kernel: bool = False) -> Union[ArrayLike, Tuple[ArrayLike, ArrayLike]]:
         """
-        Apply Gaussian blur to the input image.
+        Apply Gaussian blur to the input image or volume.
+
+        The result is layout-tagged, optionally clipped to [0, 1], and optionally
+        returned with the underlying Gaussian kernel used for blurring.
 
         Parameters
         ----------
-        sigma : float
-            Standard deviation of the Gaussian kernel.
-        return_kernel : bool
-            If True, also returns the blur kernel.
+        sigma : float, default 1.0
+            Standard deviation of the Gaussian kernel. Must be strictly positive.
+        return_kernel : bool, default False
+            If True, also returns the Gaussian kernel used for blurring.
 
         Returns
         -------
-        blurred : np.ndarray | torch.Tensor
-            Blurred image.
-        kernel : optional
-            Kernel used for blurring.
+        blurred : ArrayLike
+            Blurred image (NumPy or Torch), with layout and UID tags.
+        kernel : ArrayLike, optional
+            The Gaussian kernel used (if `return_kernel=True`).
+
+        Raises
+        ------
+        ValueError
+            If `sigma` is not strictly positive.
+
+        Notes
+        -----
+        - Automatically uses the correct channel axis (if defined in the layout).
+        - Output is tagged with `status='blurred'` and updated layout metadata.
+        - Uses the configured backend (`self.framework`) and clipping setting (`self.clip`).
+        - Returns one or two outputs depending on `return_kernel`.
         """
         if sigma <= 0:
             raise ValueError("Sigma must be positive.")
@@ -246,25 +277,40 @@ class Operator(OperatorCore):
         return_mask: bool = False,
     ) -> Union[ArrayLike, Tuple[ArrayLike, ArrayLike]]:
         """
-        Apply inpainting to an image using a mask and optional noise.
+        Apply inpainting to the input image using a binary mask and optional noise.
+
+        The masked regions can be replaced or preserved, and noise can be injected
+        inside the masked zones. The mask can be provided or generated automatically.
 
         Parameters
         ----------
-        mask : np.ndarray | torch.Tensor | None
-            Binary mask to use for inpainting. If None, will be generated.
-        sigma : float
-            Standard deviation of added noise inside the mask.
-        threshold : float
-            Threshold for mask generation (if mask is None).
-        mode : str
-            'replace' or 'keep' strategy inside mask.
-        seed : int | None
-            Random seed for reproducibility.
+        mask : ndarray or Tensor, optional
+            Binary mask to apply. If None, it will be generated based on thresholding.
+        sigma : float, default 0.05
+            Standard deviation of Gaussian noise added inside the mask.
+        threshold : float, default 0.4
+            Threshold for automatic mask generation (if `mask` is None).
+        mode : str, default 'replace'
+            Inpainting strategy. 'replace' fills masked regions with noise,
+            'keep' keeps original values outside the mask.
+        seed : int or None, optional
+            Seed for random number generation (for reproducibility).
+        return_mask : bool, default False
+            If True, also return the inpainting mask used.
 
         Returns
         -------
-        inpainted : np.ndarray | torch.Tensor
-        used_mask : np.ndarray | torch.Tensor
+        inpainted : ndarray or Tensor
+            Image with masked regions inpainted.
+        used_mask : ndarray or Tensor, optional
+            The binary mask used, only returned if `return_mask=True`.
+
+        Notes
+        -----
+        - The inpainted image is tagged with `status='inpainted'`, layout info, and UID.
+        - The mask is also tagged (`status='mask'`) and returned as a traceable output.
+        - Works with NumPy or Torch, and supports both 2D and 3D images.
+        - Layout and axis tags are preserved and updated using `OperatorCore`.
         """
         degraded, used_mask = apply_inpaint(
             self.image,
@@ -349,10 +395,18 @@ class Operator(OperatorCore):
 
 class DeepOperator(OperatorCore):
     """
-    DeepInv-based degradations (noise, blur, inpainting).
-    Assumes Torch backend and (B, C, H, W) tensors.
-    """
+    Torch-based degradation operators using DeepInv-style models.
 
+    Assumes Torch tensors with shape (B, C, H, W) or (B, C, D, H, W).
+    Inherits from OperatorCore to provide layout-aware processing,
+    tagging, and output formatting.
+
+    Notes
+    -----
+    - Backend is fixed to Torch (conversion is enforced internally).
+    - Designed to interface with learned inverse models.
+    - LayoutConfig and GlobalConfig control axis handling and output format.
+    """
     def __init__(
         self,
         image: ArrayLike,
@@ -361,19 +415,19 @@ class DeepOperator(OperatorCore):
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
         """
-        Initialize the deep operator wrapper.
+        Initialize the deep operator wrapper with layout and backend configuration.
 
         Parameters
         ----------
-        image : ndarray | Tensor
-            Input image. Will be converted to the configured framework.
+        image : ndarray or Tensor
+            Input image or batch to be processed (will be converted to Torch if needed).
         clip : bool, default False
-            Clip outputs to [0, 1].
+            Whether to clip the output to [0, 1] after degradation.
         layout_cfg : LayoutConfig
-            Axis/layout configuration.
+            Configuration for axis interpretation and layout tracking.
         global_cfg : GlobalConfig
-            Global behavior (framework, output_format, device, etc.).
-        """ 
+            Global behavior: framework, device, output format, backend strategy, etc.
+        """
         # ====[ Configuration ]====
         self.layout_cfg: LayoutConfig = layout_cfg
         self.global_cfg: GlobalConfig = global_cfg
@@ -424,17 +478,25 @@ class DeepOperator(OperatorCore):
     # ====[ Internal utility to apply a DeepInv operator ]====
     def _apply_operator(self, operator) -> torch.Tensor:
         """
-        Apply a deepinv.physics operator to the tracked image.
+        Apply a DeepInv-style physics operator to the tracked image.
 
         Parameters
         ----------
         operator : callable
-            A DeepInv operator (e.g., Blur, Denoising, Inpainting)
+            A DeepInv degradation operator (e.g., Blur, Denoising, Inpainting).
+            Must be callable and accept a Torch tensor input.
 
         Returns
         -------
         result : torch.Tensor
-            Degraded image (B, C, H, W), potentially clipped.
+            Degraded image, shaped (B, C, H, W) or (B, C, D, H, W),
+            clipped to [0, 1] if `self.clip` is True.
+
+        Notes
+        -----
+        - Runs the operator in `no_grad` mode to disable gradient tracking.
+        - Assumes input image has already been converted to a Torch tensor.
+        - Clipping is performed via `clip_image()` using the current backend config.
         """
         if self.verbose:
             print(f"[DeepOperator] Applying: {operator.__class__.__name__}")
@@ -448,17 +510,29 @@ class DeepOperator(OperatorCore):
     # ====[ Add Gaussian Noise ]====
     def noise(self, sigma: float = 0.2) -> torch.Tensor:
         """
-        Apply additive Gaussian noise using DeepInv's Denoising operator.
+        Apply additive Gaussian noise using DeepInv's denoising operator.
 
         Parameters
         ----------
-        sigma : float
-            Standard deviation of the noise.
+        sigma : float, default 0.2
+            Standard deviation of the Gaussian noise. Must be strictly positive.
 
         Returns
         -------
         noised : torch.Tensor
-            Noised image with full ND tracking and tags.
+            Noised image or volume (Torch tensor), fully tagged and layout-tracked.
+
+        Raises
+        ------
+        ValueError
+            If `sigma` is not strictly positive.
+
+        Notes
+        -----
+        - Internally uses `deepinv.physics.Denoising` with a Gaussian noise model.
+        - Operates in `no_grad` mode for performance and memory efficiency.
+        - The result is tagged with `status='noised'`, layout metadata, and a unique UID.
+        - Clipping is applied automatically if `self.clip` is enabled.
         """
         import deepinv as dinv
         
@@ -492,19 +566,36 @@ class DeepOperator(OperatorCore):
     # ====[ Apply Gaussian Blur ]====
     def blur(self, sigma: Union[Tuple[float, float], float] = (2.0, 2.0), angle: float = 0.0, return_kernel: bool = False):
         """
-        Apply a DeepInv Gaussian blur operator.
+        Apply anisotropic Gaussian blur using DeepInv's blur operator.
 
         Parameters
         ----------
-        sigma : tuple of 2 floats
-            Standard deviations of the Gaussian kernel in (x, y).
-        angle : float
-            Rotation angle in degrees.
+        sigma : float or tuple of two floats, default (2.0, 2.0)
+            Standard deviations of the Gaussian kernel in (x, y) directions.
+            If a single float is provided, the same value is used for both axes.
+        angle : float, default 0.0
+            Rotation angle (in degrees) applied to the kernel.
+        return_kernel : bool, default False
+            If True, also return the blur kernel used.
 
         Returns
         -------
         blurred : torch.Tensor
-        kernel  : torch.Tensor
+            Blurred image, layout-tagged and traced.
+        kernel : torch.Tensor, optional
+            Kernel tensor used for blurring, only returned if `return_kernel=True`.
+
+        Raises
+        ------
+        ValueError
+            If `sigma` is not a positive float or a valid (positive, positive) tuple.
+
+        Notes
+        -----
+        - Uses `deepinv.physics.gaussian_blur()` and wraps it with `deepinv.physics.Blur`.
+        - Applies padding mode `'circular'` to preserve spatial dimensions.
+        - The resulting image is tagged with `status='blurred'` and has full UID/axis tracking.
+        - The kernel is also tagged if returned.
         """
         import deepinv as dinv
         
@@ -551,21 +642,39 @@ class DeepOperator(OperatorCore):
     # ====[ Inpainting with Optional Mask ]====
     def inpaint(self, mask: Optional[ArrayLike] = None, sigma: float = 0.05, threshold: float = 0.4, return_mask: bool = False):
         """
-        Apply DeepInv inpainting using a binary mask and additive noise.
+        Apply DeepInv inpainting to the input image using a binary mask and optional Gaussian noise.
 
         Parameters
         ----------
-        mask : np.ndarray | torch.Tensor | None
-            Binary mask where True means missing data.
-        sigma : float
-            Noise standard deviation applied inside the mask.
-        threshold : float
-            Used to generate mask if none is provided.
+        mask : np.ndarray or torch.Tensor or None, default None
+            Binary mask where True/1 indicates missing regions to inpaint.
+            If None, a random mask is generated using the given threshold.
+        sigma : float, default 0.05
+            Standard deviation of the Gaussian noise applied inside the masked regions.
+        threshold : float, default 0.4
+            Threshold for generating the random mask (if `mask` is None).
+        return_mask : bool, default False
+            If True, also return the mask used for inpainting.
 
         Returns
         -------
         inpainted : torch.Tensor
-        mask      : torch.Tensor
+            Image with masked regions filled, tagged and tracked.
+        mask : torch.Tensor, optional
+            The binary mask used during inpainting (if `return_mask=True`).
+
+        Raises
+        ------
+        ValueError
+            If input image does not have shape (B, C, H, W) or if the mask shape is invalid.
+            If sigma is negative.
+
+        Notes
+        -----
+        - Uses `deepinv.physics.Inpainting` with a Gaussian noise model.
+        - Tags output with `status='inpainted'` and layout metadata.
+        - Generated or provided mask is also tagged (`status='mask'`).
+        - Layout is resolved via `LayoutConfig`, and UID tracking is applied.
         """
         import deepinv as dinv
         
@@ -682,13 +791,54 @@ def operator(
     backend: str = "sequential",
 ) -> ArrayLike:
     """
-    Convenience entrypoint to run a chosen operator through ImageProcessor.
+    Run a simple image operator (noise, blur, inpaint) using the ImageProcessor pipeline.
+
+    Dynamically builds the appropriate processor configuration for the chosen operator,
+    backend, and layout, and executes the operation on the given image.
+
+    Parameters
+    ----------
+    img : ArrayLike
+        Input image as NumPy array or Torch tensor.
+    operator : str, default "noise"
+        Operation to apply. Supported values: "noise", "blur", "inpaint".
+    operator_class : class, default Operator
+        Operator class to instantiate. Can be `Operator` or `DeepOperator`.
+    noise_level : float, default 0.2
+        Standard deviation for noise injection.
+    blur_level : float, default 0.5
+        Standard deviation for Gaussian blur.
+    threshold : float, default 0.7
+        Threshold used in inpainting mask.
+    mask_mode : str, default "grid_noised"
+        Mode for inpainting mask generation (if applicable).
+    framework : {"numpy", "torch"}, default "numpy"
+        Backend used for processing and layout conversion.
+    output_format : {"numpy", "torch"}, default "numpy"
+        Format of the returned result.
+    layout_framework : {"numpy", "torch"}, default "numpy"
+        Framework used to resolve the layout (e.g., "HWC" → axes).
+    layout_name : str, default "HWC"
+        Layout description of the input image.
+    processor_strategy : str, optional
+        Strategy used by the processor. Default is "vectorized" for NumPy and "torch" for Torch.
+    add_batch_dim : bool, optional
+        Whether to force batch dimension. Defaults to True for DeepOperator.
+    backend : str, default "sequential"
+        Execution backend strategy (e.g., "sequential", "parallel").
+
+    Returns
+    -------
+    ArrayLike
+        Resulting image after applying the selected operator.
 
     Notes
     -----
-    - If operator_class is DeepOperator, framework is forced to 'torch' and
-      add_batch_dim defaults to True.
-    """    
+    - If `operator_class` is `DeepOperator`, the framework is forced to 'torch' and
+      `add_batch_dim` defaults to True.
+    - Operator parameters are injected into the corresponding method on the fly.
+    - Uses `ImageProcessor` internally, which ensures layout tagging and axis tracking.
+    """   
     
     from operators.image_processor import ImageProcessor
     

@@ -30,6 +30,22 @@ class AxisTracker:
 
     # ====[ Initialization ]====
     def __init__(self, image: ArrayLike, operator: Optional[Any] = None, framework: Optional[str] = "numpy") -> None:
+        """
+        Initialize an AxisTracker for the given image, optionally linking it to an operator.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            The image to track, typically a NumPy array or PyTorch tensor.
+        operator : Any, optional
+            Optional reference to the operator that produced or is managing the image.
+        framework : str, optional
+            Backend framework used for axis interpretation, either "numpy" or "torch".
+
+        Returns
+        -------
+        None
+        """
         self.image: ArrayLike = image
         self.operator: Optional[Any] = operator
         self.framework: str = framework or ("torch" if torch.is_tensor(image) else "numpy")

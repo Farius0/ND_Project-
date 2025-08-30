@@ -84,8 +84,22 @@ class BaseConverter:
 
     # ====[ Axis Resolution – Fallback to Defaults ]====
     @staticmethod
-    def resolve_axis(*args, default: Optional[Any]=None) -> Optional[Any]:
-        """Return the first non-None value among `args`, otherwise `default`."""
+    def resolve_axis(*args, default: Optional[Any] = None) -> Optional[Any]:
+        """
+        Return the first non-None value from the input arguments.
+
+        Parameters
+        ----------
+        *args : Any
+            Sequence of values to check.
+        default : Any, optional
+            Value to return if all arguments are None.
+
+        Returns
+        -------
+        Any or None
+            The first non-None value in `args`, or `default` if none is found.
+        """
         return next((x for x in args if x is not None), default)
 
     # ===[ NORMALIZATION ]===

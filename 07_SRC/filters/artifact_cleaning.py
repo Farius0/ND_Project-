@@ -29,14 +29,28 @@ class ArtifactCleanerND(OperatorCore):
     ND-compatible cleaner for structured image artifacts (e.g., horizontal stripes).
     Dual backend (NumPy / Torch), applied slice-by-slice via ImageProcessor.
     """
+
     def __init__(
         self,
-
         framework: Framework = "numpy",
         layout_name: str = "DHW",
         layout_framework: Framework = "numpy",
         threshold: float = 0.5,
     ) -> None:
+        """
+        Initialize an ND artifact cleaner with layout and backend configuration.
+
+        Parameters
+        ----------
+        framework : {"numpy", "torch"}, default "numpy"
+            Backend framework used for processing (NumPy or PyTorch).
+        layout_name : str, default "DHW"
+            Input layout name describing axis order (e.g., "DHW", "HWC").
+        layout_framework : {"numpy", "torch"}, default "numpy"
+            Layout resolution method based on backend convention.
+        threshold : float, default 0.5
+            Threshold used to identify and remove structured artifacts.
+        """
         
         # ====[ Configuration ]====
         self._proc_params: Dict[str, Any] = {"processor_strategy": "parallel"}
@@ -79,7 +93,6 @@ class ArtifactCleanerND(OperatorCore):
         )        
     
     # ---------------- Feature extraction pipeline ----------------
-
     def extractor(
         self,
         img: ArrayLike,
@@ -87,8 +100,26 @@ class ArtifactCleanerND(OperatorCore):
         window_size: Optional[int] = None,
     ) -> ArrayLike:
         """
-        Thin wrapper to call the project-wide `feature_extractor` with consistent layout.
+        Extract features from an image using the project-wide `feature_extractor`.
+
+        This method ensures consistent layout handling and backend compatibility.
+
+        Parameters
+        ----------
+        img : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        features : list of str, optional
+            Specific features to extract (e.g., "entropy", "gradient", "glcm").
+            If None, all default features will be computed.
+        window_size : int, optional
+            Size of the local window for window-based features (e.g., GLCM, entropy).
+
+        Returns
+        -------
+        ArrayLike
+            Output feature map(s), matching the backend and layout conventions.
         """
+
         return feature_extractor(
             img,
             features=features,
@@ -104,7 +135,21 @@ class ArtifactCleanerND(OperatorCore):
         
     def _extract_features(self, img2d: ArrayLike) -> Tuple[ArrayLike, ArrayLike]:
         """
-        Build smoothed Sobel-based features gx, gy, then edge maps and median filter.
+        Extract Sobel-based edge features from a 2D image slice.
+
+        Applies gradient filters (gx, gy), computes edge magnitude,
+        and applies a median filter to reduce noise and artifacts.
+
+        Parameters
+        ----------
+        img2d : ArrayLike
+            2D input image (single slice) as a NumPy array or PyTorch tensor.
+
+        Returns
+        -------
+        Tuple[ArrayLike, ArrayLike]
+            - Edge magnitude map (float).
+            - Smoothed version (e.g., median-filtered) of the edge map.
         """
         tagger = self.track(img2d)
 
@@ -126,7 +171,32 @@ class ArtifactCleanerND(OperatorCore):
         self, gx: ArrayLike, gy: ArrayLike
     ) -> Tuple[ArrayLike, ArrayLike, int, bool, bool]:
         """
-        Build a binary mask from gx-gy contrast and derive band statistics.
+        Generate a binary mask from the difference between gx and gy gradients,
+        and compute band-level summary statistics for detection.
+
+        The mask highlights regions where gx - gy == 1, indicating potential artifact patterns.
+        Summary statistics are computed along axis 1 (typically height or depth).
+
+        Parameters
+        ----------
+        gx : ArrayLike
+            Horizontal gradient feature map (e.g., from Sobel filter).
+        gy : ArrayLike
+            Vertical gradient feature map.
+
+        Returns
+        -------
+        Tuple
+            - mask : ArrayLike
+                Binary mask indicating artifact regions (1 = candidate, 0 = background).
+            - mean_ax : ArrayLike
+                Mean mask value along axis 1 (per-band activation).
+            - line_idx : int
+                Index of the band with the maximum mask activation.
+            - cond_1 : bool
+                True if max(mean_ax) > threshold.
+            - cond_2 : bool
+                True if more than 2 bands exceed the threshold.
         """
         diff = gx - gy
         mask = torch.where(diff != 1., 0., 1.) if isinstance(diff, torch.Tensor) else np.where(diff != 1., 0., 1.)
@@ -144,7 +214,30 @@ class ArtifactCleanerND(OperatorCore):
         line_idx: int,
     ) -> ArrayLike:
         """
-        Zero-out the detected band and inpaint rows by simple vertical interpolation.
+        Clean and inpaint a horizontal artifact band using vertical interpolation.
+
+        The method identifies a corrupted band around `line_idx` (based on activation in `mean_ax`),
+        zeros out detected artifact regions in the band using the `mask`,
+        refines edges using morphological closing on `gy`,
+        and finally fills the band by interpolating values from adjacent rows.
+
+        Parameters
+        ----------
+        img : ArrayLike
+            2D input image slice to clean (NumPy or Torch).
+        mask : ArrayLike
+            Binary mask indicating corrupted regions (1 = artifact).
+        gy : ArrayLike
+            Vertical edge map used to detect structural continuity.
+        mean_ax : ArrayLike
+            Mean mask activation across rows (used to determine thickness).
+        line_idx : int
+            Central row index of the corrupted band.
+
+        Returns
+        -------
+        ArrayLike
+            Cleaned image with the artifact band inpainted.
         """
         H = int(img.shape[0])
         count = int((mean_ax > self.threshold).sum().item() if isinstance(mean_ax, torch.Tensor) else np.sum(mean_ax > self.threshold))
@@ -185,8 +278,23 @@ class ArtifactCleanerND(OperatorCore):
 
     def _clean_slice(self, slice2d: ArrayLike) -> ArrayLike:
         """
-        Detect a stripe band on a 2D slice and inpaint it if confident.
+        Detect and optionally remove a horizontal stripe artifact from a 2D image slice.
+
+        Applies feature extraction and binary mask generation to locate stripe regions.
+        If artifact presence is confidently detected, the band is inpainted by vertical interpolation.
+        Otherwise, the slice is returned unmodified (except optional zeroing above the line).
+
+        Parameters
+        ----------
+        slice2d : ArrayLike
+            2D input image slice (NumPy or Torch).
+
+        Returns
+        -------
+        ArrayLike
+            Cleaned 2D image slice, with artifact region inpainted if detected.
         """
+
         gx, gy = self._extract_features(slice2d)
         mask, mean_ax, line_idx, cond_1, cond_2 = self._generate_mask(gx, gy)
 
@@ -201,7 +309,23 @@ class ArtifactCleanerND(OperatorCore):
     # @timer(return_result=True, return_elapsed=False, name ="artifact_cleaning")
     def __call__(self, image: ArrayLike, axis: int = 1) -> ArrayLike:
         """
-        Clean a 2D image or a 3D volume along a given axis (0: axial, 1: coronal, 2: sagittal).
+        Clean a 2D image or a 3D volume from structured artifacts along a given axis.
+
+        For 3D inputs, the method processes the volume slice-by-slice along the specified axis
+        (0: axial, 1: coronal, 2: sagittal). For 2D inputs, it applies the cleaning directly.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input 2D image or 3D volume (NumPy array or PyTorch tensor).
+        axis : int, default 1
+            Axis along which to process the volume if the input is 3D:
+            0 = axial slices, 1 = coronal slices, 2 = sagittal slices.
+
+        Returns
+        -------
+        ArrayLike
+            Cleaned image or volume, with updated layout and metadata tags.
         """
         img = self.convert_once(image=image, tag_as="input", framework=self.framework)
         

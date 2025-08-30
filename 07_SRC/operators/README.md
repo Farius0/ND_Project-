@@ -79,6 +79,5 @@ grad = DiffOperator(
 ## Notes
 
 - **Dual backend**: most operators accept NumPy or Torch inputs and preserve dtype/device when feasible.  
-- **Axis safety**: prefer passing an explicit `LayoutConfig` (e.g., `HWC`, `HW`, `DHW`) to avoid ambiguity.  
-- **Transforms**: for torchvision pipelines, use `TransformManager.apply_transforms(...)` to keep tags and avoid silent layout errors.  
+- **Axis safety**: prefer passing an explicit `LayoutConfig` (e.g., `HWC`, `HW`, `DHW`) to avoid ambiguity.    
 - **Segmentation features**: `SegmenterND` can consume features from `feature_extractor(...)` and/or raw channels; labels can be returned as integer map, one‑hot, or RGB palette.

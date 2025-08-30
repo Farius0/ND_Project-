@@ -34,6 +34,12 @@ class SegmenterND(OperatorCore):
     """
     Modular ND segmentation with dual-backend (NumPy/Torch), layout-aware logic,
     and multiple strategy backends (thresholding, clustering, watershed, etc.).
+
+    Notes
+    -----
+    - Axis-aware segmentation: supports 2D, 3D, and batched ND volumes.
+    - Strategy-based: segmentation mode controlled via `SegmenterConfig`.
+    - Can be used with `ImageProcessor` for vectorized or parallel processing.
     """
 
     def __init__(
@@ -141,17 +147,27 @@ class SegmenterND(OperatorCore):
     
     def _get_axes(self, arr: ArrayLike) -> List[int]:
         """
-        Determine the spatial axes to apply differential operators on.
+        Identify spatial axes for applying differential operators (e.g., gradients, divergence).
+
+        Uses axis tags when available (channel, batch, direction, feature) to exclude
+        non-spatial dimensions from the returned list.
 
         Parameters
         ----------
-        arr : np.ndarray | torch.Tensor
-            Input image or tensor.
+        arr : np.ndarray or torch.Tensor
+            Input array or tensor to analyze.
 
         Returns
         -------
-        axes : list[int]
-            List of axes eligible for gradient/divergence computation.
+        List[int]
+            List of axis indices that correspond to spatial dimensions.
+
+        Notes
+        -----
+        - In 2D, all axes are considered spatial by default.
+        - If axis tags are available (via `get_tag()`), channel, batch, direction,
+        and optionally feature axes are excluded from the result.
+        - Negative axis indices are converted to positive based on the array's ndim.
         """
         ndim = arr.ndim
         axes = list(range(ndim))
@@ -186,7 +202,34 @@ class SegmenterND(OperatorCore):
 
     def __call__(self, image: ArrayLike) -> ArrayLike:
         """
-        Apply the configured segmentation strategy to the image.
+        Apply the selected segmentation strategy to the input image.
+
+        The segmentation mode is chosen via `self.mode`, and mapped to
+        an internal function. Supports both standard thresholding methods
+        and advanced ND-compatible algorithms.
+
+        Parameters
+        ----------
+        image : np.ndarray or torch.Tensor
+            Input image to segment (2D, 3D or ND array).
+
+        Returns
+        -------
+        np.ndarray or torch.Tensor
+            Segmentation result with same backend as input,
+            tagged as 'segmented'.
+
+        Raises
+        ------
+        ValueError
+            If the configured mode is not recognized.
+
+        Notes
+        -----
+        - The input is first normalized and converted via `convert_once()`.
+        - Strategy dispatch is handled by a static map (`strategy_map`).
+        - Output format and dtype are adapted by `to_output()`.
+        - Supports a wide range of strategies: Otsu, KMeans, Watershed, etc.
         """
         image = self.convert_once(image)
 
@@ -219,16 +262,26 @@ class SegmenterND(OperatorCore):
 
     def _thresholding(self, image: ArrayLike) -> ArrayLike:
         """
-        Apply thresholding using ThresholdingOperator (Otsu, Yen, Li, etc.).
+        Apply a standard thresholding method to segment the image.
+
+        Uses `ThresholdingOperator` internally with the configured method
+        (e.g., Otsu, Yen, Li, Triangle, Isodata).
 
         Parameters
         ----------
-        image : np.ndarray | torch.Tensor
+        image : np.ndarray or torch.Tensor
             Input image to segment.
 
         Returns
         -------
-        Binary mask or thresholded output.
+        np.ndarray or torch.Tensor
+            Binary segmentation mask or thresholded output, depending on the method.
+
+        Notes
+        -----
+        - Method is selected from `self.mode`. Defaults to 'otsu' if invalid.
+        - Internally applies preprocessing and layout normalization via `ThresholdingOperator`.
+        - Returns a mask (boolean or integer) with same shape and backend as input.
         """
         from operators.thresholding import ThresholdingOperator
         
@@ -245,18 +298,27 @@ class SegmenterND(OperatorCore):
     
     def threshold_fixed_nd(self, image: ArrayLike) -> ArrayLike:
         """
-        Fixed threshold segmentation.
+        Apply fixed threshold segmentation on an ND image.
+
+        Uses a user-defined scalar threshold (typically in [0, 1]) to
+        produce a binary mask.
 
         Parameters
         ----------
         image : np.ndarray or torch.Tensor
-        threshold : float (0-1 for normalized image)
+            Input image to segment. Should be normalized if using a threshold in [0, 1].
 
         Returns
         -------
-        Binary mask (same shape).
-        """
-        
+        np.ndarray or torch.Tensor
+            Binary segmentation mask with the same shape and backend as the input.
+
+        Notes
+        -----
+        - The threshold value is taken from `self.threshold`.
+        - Internally uses `self.processor` to apply backend-specific logic.
+        - Works with both NumPy and Torch inputs, on arbitrary ND volumes.
+        """        
         threshold = self.threshold
         
         def thresh_np(x: np.ndarray) -> np.ndarray:
@@ -270,20 +332,27 @@ class SegmenterND(OperatorCore):
     
     def threshold_iterative_nd(self, image: ArrayLike) -> ArrayLike:
         """
-        Adaptive global thresholding (Ridler-Calvard) for ND images.
+        Apply adaptive global thresholding (Ridler–Calvard method) on ND images.
 
-        Automatically separates foreground and background by iterative refinement.
+        Iteratively refines a global threshold that separates foreground from background
+        based on intensity means, until convergence or maximum iterations.
 
         Parameters
         ----------
-        epsilon : float
-            Convergence criterion.
-        max_iter : int
-            Maximum number of iterations.
-
+        image : np.ndarray or torch.Tensor
+            Input image to segment. Should be normalized to [0, 1] or similar.
+        
         Returns
         -------
-        Binary mask (same shape as input).
+        np.ndarray or torch.Tensor
+            Binary segmentation mask (same shape and backend as input).
+
+        Notes
+        -----
+        - The convergence criterion is set by `self.epsilon`.
+        - The maximum number of iterations is set by `self.max_iter`.
+        - Returns a mask with 0s and 1s as float values.
+        - Backend-specific logic is dispatched via `self.processor`.
         """
         epsilon = self.epsilon
         max_iter = self.max_iter
@@ -326,18 +395,32 @@ class SegmenterND(OperatorCore):
         normalize_output: Optional[bool] = None,
     ) -> ArrayLike:
         """
-        Multi-threshold segmentation: divides the image into N+1 classes.
+        Apply multi-threshold segmentation to divide an image into N+1 discrete classes.
+
+        Each threshold defines a transition point between classes. Class labels are
+        assigned incrementally based on intensity values. Optionally, the output can be
+        normalized to [0, 1].
 
         Parameters
         ----------
-        thresholds : list[float]
-            List of thresholds (sorted). Must be in [0, 1] if image is normalized.
-        normalize_output : bool
-            If True, output will be scaled to [0, 1] by dividing class labels.
+        image : np.ndarray or torch.Tensor
+            Input image to segment. Should be normalized to [0, 1] or similar.
+        thresholds : list of float, optional
+            Threshold values (must be sorted). If None, uses `self.multi_thresholds`.
+        normalize_output : bool, optional
+            If True, output class labels are scaled to [0, 1] range.
+            If None, uses `self.normalize_output`.
 
         Returns
         -------
-        Segmented image with discrete class labels (or normalized in [0,1]).
+        np.ndarray or torch.Tensor
+            Segmentation map with either discrete class labels or normalized float values.
+
+        Notes
+        -----
+        - For K thresholds, output will contain K+1 classes: [0, 1, ..., K].
+        - Class labels are float32 (not int) to allow optional normalization.
+        - Works for arbitrary ND shapes and dual backends (NumPy / Torch).
         """
         thresholds = thresholds or self.multi_thresholds
         thresholds = sorted(thresholds)
@@ -367,11 +450,27 @@ class SegmenterND(OperatorCore):
 
     def threshold_entropy_nd(self, image: ArrayLike) -> ArrayLike:
         """
-        Entropy-based global thresholding using Shannon criterion.
+        Apply global entropy-based thresholding (Shannon criterion) on an ND image.
+
+        Selects the optimal threshold that maximizes the sum of foreground and background
+        entropies, based on the normalized histogram of pixel intensities.
+
+        Parameters
+        ----------
+        image : np.ndarray or torch.Tensor
+            Input image (assumed to be normalized in [0, 1]).
 
         Returns
         -------
-        Binary mask after optimal entropy-based split.
+        np.ndarray or torch.Tensor
+            Binary segmentation mask with same shape and backend as input.
+
+        Notes
+        -----
+        - The number of histogram bins is controlled by `self.bins`.
+        - Internally computes class probabilities and Shannon entropy for each possible split.
+        - Avoids zero-probability classes and stabilizes computation using `eps = 1e-8`.
+        - Compatible with both NumPy and Torch backends.
         """
         eps = 1e-8
         bins = self.bins
@@ -417,7 +516,28 @@ class SegmenterND(OperatorCore):
 
     def threshold_otsu_multi_nd(self, image: ArrayLike) -> ArrayLike:
         """
-        Multi-class thresholding based on Otsu generalized to multiple thresholds.
+        Apply multi-class Otsu thresholding on an ND image.
+
+        Extends Otsu's method to multiple thresholds, segmenting the image into N classes
+        by maximizing between-class variance over a histogram-based partition.
+
+        Parameters
+        ----------
+        image : np.ndarray or torch.Tensor
+            Input image to segment. Should be normalized to [0, 1].
+
+        Returns
+        -------
+        np.ndarray or torch.Tensor
+            Segmented image with class labels encoded as float values in [0, 1].
+
+        Notes
+        -----
+        - The number of classes is defined by `self.num_classes` (default: 3).
+        - A fixed number of histogram bins is used (`self.bins`, e.g., 256).
+        - All possible threshold combinations are enumerated (up to 1000 max).
+        - For performance, the Torch implementation converts to NumPy before processing.
+        - Output values are normalized float labels: 0.0, 0.5, 1.0 (for 3 classes).
         """
         num_classes = int(self.num_classes or 3)
         bins = int(self.bins)
@@ -472,27 +592,44 @@ class SegmenterND(OperatorCore):
         max_iter: Optional[int] = None,
         max_k: Optional[int] = 10,
         normalize_output: Optional[bool] = False,
-    ) -> ArrayLike:        
-        
+    ) -> ArrayLike:
         """
-        Segment ND image using KMeans clustering (intensity or features).
-        
+        Segment an ND image using KMeans clustering on pixel intensities or features.
+
+        Supports both fixed and automatic selection of the number of clusters (k),
+        as well as layout-aware reshaping for channel- or feature-based inputs.
+
         Parameters
         ----------
-        k : int or None
-            Number of clusters (if known).
-        auto_k : bool
-            Whether to estimate optimal k.
-        method : str
-            'silhouette' or 'elbow' for auto-k selection.
-        max_k : int
-            Max number of clusters to test (if auto_k=True).
-        normalize_output : bool
-            If True, output values are in [0,1], else raw class labels [1,...,k].
+        image : np.ndarray or torch.Tensor
+            Input image to segment. Can be 2D, 3D or ND, with or without channels/features.
+        k : int, optional
+            Number of clusters. Required if `auto_k=False`.
+        auto_k : bool, optional
+            If True, automatically estimate the optimal number of clusters using the selected method.
+        method : {'silhouette', 'elbow'}, optional
+            Method to use when `auto_k=True`. Default is 'silhouette'.
+        batch_size : int, optional
+            Mini-batch size for `MiniBatchKMeans`. Automatically tuned if not provided.
+        max_iter : int, optional
+            Maximum number of iterations for clustering. Auto-tuned based on image size.
+        max_k : int, default 10
+            Maximum number of clusters to test when `auto_k=True`.
+        normalize_output : bool, optional
+            If True, output will be scaled to [0, 1] (useful for visualization).
 
         Returns
         -------
-        Segmented ND image.
+        np.ndarray or torch.Tensor
+            Segmentation map with class labels (int or float), shaped like the input image.
+
+        Notes
+        -----
+        - The input is reshaped to 2D (N, D) where N is the number of pixels and D is the feature size.
+        - Cluster labels are ordered by average intensity for consistency across runs.
+        - If `normalize_output=True`, classes are scaled to float values in [0, 1].
+        - Works for both intensity-only inputs and (C, F)-style multi-feature images.
+        - Final output format matches `self.output_format` (Torch or NumPy).
         """
         # === Flatten features ===
         x = self.convert_once(image, tag_as="input", framework="numpy",)
@@ -581,32 +718,46 @@ class SegmenterND(OperatorCore):
 
         return torch.tensor(labels_ordered, device=image.device) if self.output_format == "torch" else labels_ordered
     
-    # def kmeans_nd_torch(self,
-    #                 x: torch.Tensor,
-    #                 k: int = 4,
-    #                 max_iter: int = 100,
-    #                 tol: float = 1e-4,
-    #                 normalize_output: bool = False):
+    # def kmeans_nd_torch(
+    #     self,
+    #     x: torch.Tensor,
+    #     k: int = 4,
+    #     max_iter: int = 100,
+    #     tol: float = 1e-4,
+    #     normalize_output: bool = False
+    # ) -> torch.Tensor:
     #     """
-    #     Torch-native ND KMeans clustering on feature volume.
+    #     Perform KMeans clustering directly on an ND Torch tensor.
+
+    #     This method supports multi-dimensional volumes with optional channels or features.
+    #     It flattens spatial dimensions and applies a Torch-native KMeans algorithm
+    #     using Euclidean distance and iterative centroid updates.
 
     #     Parameters
     #     ----------
-    #     features : torch.Tensor
-    #         ND feature tensor (..., F) where F = number of features.
-    #     k : int
-    #         Number of clusters.
-    #     max_iter : int
+    #     x : torch.Tensor
+    #         Input tensor of shape (..., C), (..., F), or (..., C, F), depending on configuration.
+    #     k : int, default 4
+    #         Number of clusters to assign.
+    #     max_iter : int, default 100
     #         Maximum number of KMeans iterations.
-    #     tol : float
-    #         Tolerance for convergence (centroid shift).
-    #     normalize_output : bool
-    #         If True, normalize output labels to [0, 1].
+    #     tol : float, default 1e-4
+    #         Convergence threshold (L2-norm of centroid shift).
+    #     normalize_output : bool, default False
+    #         If True, normalize output labels to the range [0, 1].
 
     #     Returns
     #     -------
-    #     labels : torch.Tensor
-    #         ND label map (same shape as features[..., 0]).
+    #     torch.Tensor
+    #         ND segmentation map with the same spatial shape as input.
+    #         Labels are 1-based integers (or floats in [0, 1] if normalized).
+
+    #     Notes
+    #     -----
+    #     - Layout is resolved automatically using axis tagging (e.g., channel_axis, feature_axis).
+    #     - Works for 2D, 3D, or ND inputs with or without features/channels.
+    #     - Final labels are ordered by distance to centroids (no mean-sorting).
+    #     - This implementation avoids external libraries (pure Torch).
     #     """
     #     # === Retrieve layout-aware axes ===
     #     channel_axis = self.get_axis(x, "channel_axis")
@@ -672,28 +823,38 @@ class SegmenterND(OperatorCore):
         linkage: str = "ward",
         metric: str = "euclidean",
         normalize_output: bool = False
-        ) -> ArrayLike:
+    ) -> ArrayLike:
         """
-        Segment ND image using Agglomerative Clustering.
+        Apply agglomerative clustering for ND image segmentation.
+
+        Supports layout-aware reshaping of multichannel or feature-rich data.
+        Falls back to downsampling if input size exceeds memory-safe limits.
 
         Parameters
         ----------
         image : np.ndarray or torch.Tensor
-            ND image (can be multichannel or feature map).
-        n_clusters : int
-            Number of clusters to form (default: self.k).
-        linkage : str
-            Linkage criterion: 'ward', 'average', 'complete'.
-        affinity : str
-            Distance metric: 'euclidean', 'manhattan', etc.
-            Note: ignored if linkage == 'ward'.
-        normalize_output : bool
-            If True, scale output to [0,1].
+            Input ND image. Can include channels and/or features.
+        n_clusters : int, optional
+            Number of clusters to form. If None, defaults to `self.k` or 3.
+        linkage : {'ward', 'average', 'complete'}, default 'ward'
+            Linkage strategy for merging clusters.
+        metric : str, default 'euclidean'
+            Distance metric (ignored if `linkage='ward'`).
+        normalize_output : bool, default False
+            If True, normalize output labels to [0, 1].
 
         Returns
         -------
-        labels : np.ndarray or torch.Tensor
-            Clustered label map (same spatial shape).
+        np.ndarray or torch.Tensor
+            Segmentation map with shape matching spatial dimensions of input.
+            Output is float if normalized, otherwise integer-labeled.
+
+        Notes
+        -----
+        - Layout axes (channel, feature) are automatically moved to the end before clustering.
+        - For large volumes (> 50,000 pixels), downsampling is applied to avoid memory overload.
+        - When downsampling occurs, non-selected pixels are assigned label 0 (naive fallback).
+        - Final labels are reshaped to spatial dimensions and converted to Torch if required.
         """
         # === Preprocess input ===
         x = self.convert_once(image, tag_as="input", framework="numpy")
@@ -762,23 +923,37 @@ class SegmenterND(OperatorCore):
         normalize_output: bool = False,
     ) -> ArrayLike:
         """
-        Segment ND image using HDBSCAN clustering (density-based, robust, auto-k).
+        Segment an ND image using HDBSCAN clustering (density-based, auto-k, robust to noise).
+
+        HDBSCAN groups pixels based on local density without requiring a predefined number of clusters.
+        Outliers are automatically detected and labeled as 0.
 
         Parameters
         ----------
         image : np.ndarray or torch.Tensor
-            ND image (can be multichannel or feature map).
-        min_cluster_size : int
-            Minimum size for a region to be considered a cluster.
-        min_samples : int or None
-            Minimum samples to define dense region (default: same as min_cluster_size).
-        normalize_output : bool
-            If True, scale output to [0,1].
+            Input ND image. May include channels or feature axes.
+        min_cluster_size : int, default 50
+            Minimum size (in pixels) for a group to be considered a cluster.
+        min_samples : int, optional
+            Minimum number of neighbors to define a dense region.
+            Defaults to `min_cluster_size` if not specified.
+        normalize_output : bool, default False
+            If True, scale final labels to the range [0, 1].
 
         Returns
         -------
-        labels : np.ndarray or torch.Tensor
-            Clustered label map (same spatial shape).
+        np.ndarray or torch.Tensor
+            Segmentation map with shape matching input spatial dimensions.
+            - Labels are 0-based, with outliers assigned 0.
+            - If normalized, values are in [0, 1] as float32.
+
+        Notes
+        -----
+        - Layout-aware: channels/features are moved to the last axis automatically.
+        - Feature vectors are flattened before clustering.
+        - Outlier pixels (cluster ID -1) are relabeled to 0.
+        - If `normalize_output=True`, labels are scaled by their maximum value.
+        - Output format is determined by `self.output_format` ('torch' or 'numpy').
         """
         # === Preprocess input
         x = self.convert_once(image, tag_as="input", framework="numpy")
@@ -826,24 +1001,41 @@ class SegmenterND(OperatorCore):
     
     @staticmethod
     def _format_segmentation_output(
-        segmentation: np.ndarray, return_mode: str = "labels", palette: Optional[np.ndarray] = None
+        segmentation: np.ndarray,
+        return_mode: str = "labels",
+        palette: Optional[np.ndarray] = None
     ) -> np.ndarray:
         """
-        Format segmentation output into label, RGB or one-hot format.
+        Format a segmentation map into one of several output modes: labels, RGB, or one-hot.
 
         Parameters
         ----------
         segmentation : np.ndarray
-            ND label array with integer labels.
-        return_mode : str
-            One of 'labels', 'rgb', 'onehot'.
-        palette : Optional[np.ndarray]
-            Optional color palette for RGB mode.
+            ND array of integer class labels (e.g., from a clustering or thresholding method).
+        return_mode : {'labels', 'rgb', 'onehot'}, default 'labels'
+            Output format:
+            - 'labels': returns raw integer labels.
+            - 'rgb': returns an RGB image using a color palette.
+            - 'onehot': returns a (C, ...) one-hot encoded array.
+        palette : np.ndarray, optional
+            Optional color palette of shape (n_classes, 3) for RGB mode.
+            If not provided, a deterministic palette is generated.
 
         Returns
         -------
         np.ndarray
-            Segmentation formatted accordingly.
+            Segmentation output formatted according to `return_mode`.
+
+        Raises
+        ------
+        ValueError
+            If `return_mode` is not one of the supported options.
+
+        Notes
+        -----
+        - The number of classes is inferred from `segmentation.max() + 1`.
+        - RGB mode assigns one unique color per class using the palette.
+        - One-hot mode returns a binary array of shape (C, ...) where C = number of classes.
         """
         if return_mode == "labels":
             return segmentation
@@ -877,7 +1069,42 @@ class SegmenterND(OperatorCore):
         palette: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
-        Region growing segmentation for ND images, with multichannel and priority-based expansion.
+        Segment an ND image using a region growing algorithm with intensity and distance constraints.
+
+        Each seed expands to nearby pixels if the local intensity is similar (below threshold)
+        and spatial proximity is within tolerance. Multichannel images are supported using
+        Euclidean distance in feature space.
+
+        Parameters
+        ----------
+        image : np.ndarray or torch.Tensor
+            Input ND image. Must be normalized in [0, 1].
+        seeds : list of tuple[int, ...], optional
+            List of seed coordinates. If None, seeds are generated randomly or from `self.seeds`.
+        threshold : float, default 0.1
+            Maximum intensity difference allowed for inclusion in the region.
+        distance_tolerance : float, default 5.0
+            Maximum distance from the seed point to grow. Uses Euclidean distance.
+        return_mode : {'labels', 'rgb', 'onehot'}, default 'labels'
+            Output format:
+            - 'labels': raw label map.
+            - 'rgb': colorized label map using `palette`.
+            - 'onehot': one-hot encoded map (shape: [C, ...]).
+        palette : np.ndarray, optional
+            Optional color palette for RGB output. If None, a default one is generated.
+
+        Returns
+        -------
+        np.ndarray
+            Segmentation result with same spatial shape as input.
+            Format depends on `return_mode`.
+
+        Notes
+        -----
+        - Supports multichannel inputs via channel-aware intensity comparison.
+        - Seed expansion is priority-based (using a min-heap and distance map).
+        - The algorithm stops when all reachable pixels have been labeled.
+        - Channels/features are automatically managed using axis tags.
         """
         arr = self.convert_once(image,tag_as="input", framework="numpy",)
 
@@ -961,8 +1188,38 @@ class SegmenterND(OperatorCore):
         return_labels: bool = False,
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
-        ND Split-and-Merge segmentation with gradient-aware merging.
-        Fully scalar-consistent, channel-axis aware, and ND-compatible.
+        Segment an ND image using a split-and-merge strategy with gradient-aware merging.
+
+        The algorithm recursively splits the image into smaller regions based on intensity
+        homogeneity and local gradients. Adjacent regions are then merged if their
+        intensities are similar and gradient boundaries are weak.
+
+        Parameters
+        ----------
+        image : np.ndarray or torch.Tensor
+            Input ND image. Can include channels or batches.
+        min_size : int, default 8
+            Minimum size (per spatial axis) of a block before stopping the split.
+        threshold_split : float, default 0.02
+            Threshold for intensity standard deviation to consider a region homogeneous.
+        threshold_merge : float, default 0.1
+            Maximum intensity difference allowed between adjacent regions for merging.
+        return_labels : bool, default False
+            If True, returns both the final map and the initial pre-merge labels.
+
+        Returns
+        -------
+        np.ndarray or torch.Tensor
+            Final segmentation map after merging.
+            If `return_labels=True`, returns a tuple (merged, initial_labels).
+
+        Notes
+        -----
+        - Uses `sobel` gradients to detect structural boundaries.
+        - Automatically resolves spatial axes from tagged layouts.
+        - In multichannel mode, gradient magnitude is computed via L2 norm.
+        - Uses a region-growing style neighborhood scan for merging.
+        - Merge logic uses both intensity similarity and gradient suppression.
         """
         image = self.resize_op(image)
         is_torch = torch.is_tensor(image)
@@ -1128,25 +1385,38 @@ class SegmenterND(OperatorCore):
         connectivity: int = 1,
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
-        ND-compatible Watershed propagation using a priority queue.
+        Perform N-dimensional watershed segmentation using a priority queue.
+
+        Propagates region labels from initial markers across a gradient map,
+        following the steepest descent (lowest elevation) rule. Fully ND-compatible
+    and suitable for 2D, 3D or higher.
 
         Parameters
         ----------
         gradient : np.ndarray or torch.Tensor
-            Gradient or elevation map.
+            Input gradient or elevation map (lower = more likely to be flooded).
         markers : np.ndarray
-            Labeled minima (e.g., from detect_basins_nd).
-        return_lines : bool
-            If True, returns both segmentation and watershed lines.
-        connectivity : int
-            Connectivity to use for neighbor propagation.
+            Initial labeled markers. Must have shape matching `gradient` and contain
+            positive integers for seeded regions; 0 for unlabeled.
+        return_lines : bool, default False
+            If True, also returns the watershed lines (boundaries between regions).
+        connectivity : int, default 1
+            Neighborhood connectivity (1 for 6/18/26-connectivity in 3D).
 
         Returns
         -------
         segmented : np.ndarray
-            Labeled segmentation.
-        lines (optional) : np.ndarray
-            Watershed lines (binary mask).
+            Labeled segmentation result with same shape as input.
+        lines : np.ndarray, optional
+            Binary mask of watershed lines (only if `return_lines=True`).
+
+        Notes
+        -----
+        - Works on any number of dimensions.
+        - Uses a fast priority queue (heap) for label propagation.
+        - The gradient acts as a cost surface: lower values are filled first.
+        - The `markers` array defines initial labels and must be non-zero for seeds.
+        - If Torch input is given, it is converted to NumPy internally.
         """
         is_torch = torch.is_tensor(gradient)
         grad = gradient.detach().cpu().numpy() if is_torch else np.array(gradient, copy=True)
@@ -1182,19 +1452,33 @@ class SegmenterND(OperatorCore):
 
     def extract_watershed_lines_nd(self, labels: np.ndarray, connectivity: int = 1) -> np.ndarray:
         """
-        Extract watershed lines (boundaries) from labeled ND segmentation.
+        Extract watershed lines (region boundaries) from an ND labeled segmentation map.
+
+        Detects label transitions between neighboring voxels/pixels using the specified
+        connectivity, and marks them as watershed lines.
 
         Parameters
         ----------
         labels : np.ndarray
-            Labeled segmentation (integer).
-        connectivity : int
-            ND-connectivity (1 = faces, 2 = edges+faces, etc.)
+            ND array of integer region labels (e.g., output from watershed segmentation).
+        connectivity : int, default 1
+            ND-connectivity to use when checking for neighbor transitions:
+            - 1: face-connected neighbors (e.g., 6 in 3D),
+            - 2: face + edge,
+            - 3: full (face + edge + corner), if supported.
 
         Returns
         -------
         lines : np.ndarray
-            Binary mask of watershed lines (same shape as labels).
+            Binary mask (uint8) of the same shape as `labels`, where 1 marks
+            boundary voxels and 0 marks interior voxels.
+
+        Notes
+        -----
+        - A voxel is considered a boundary if at least one of its neighbors
+        has a different non-zero label.
+        - Connectivity affects the neighborhood definition used in comparison.
+        - Label 0 is ignored (assumed to be background/unlabeled).
         """
         structure = ndimage.generate_binary_structure(labels.ndim, connectivity)
         offsets = np.array(list(zip(*np.where(structure)))) - np.array(structure.shape) // 2
@@ -1219,7 +1503,36 @@ class SegmenterND(OperatorCore):
         return_lines: bool = False,
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
-        Perform ND watershed segmentation using gradient magnitude from feature_extractor.
+        Segment an ND image using a watershed algorithm based on gradient magnitude.
+
+        Applies Gaussian smoothing followed by Sobel gradient extraction to compute
+        an elevation map. Local minima below a percentile threshold are used as markers
+        for region flooding via watershed propagation.
+
+        Parameters
+        ----------
+        image : np.ndarray or torch.Tensor
+            Input ND image. Channels are handled automatically if tagged.
+        percentile_minima : float, default 5.0
+            Percentile threshold to define local minima used as markers.
+            Lower values result in fewer, stronger seed regions.
+        connectivity : int, default 1
+            ND-connectivity for structuring element in local minima detection and propagation.
+        return_lines : bool, default False
+            If True, also return watershed lines as a binary mask.
+
+        Returns
+        -------
+        np.ndarray or tuple
+            - If `return_lines=False`: segmentation map with region labels.
+            - If `return_lines=True`: (segmentation, watershed_lines).
+
+        Notes
+        -----
+        - Uses Gaussian filtering for pre-smoothing and Sobel filters for gradient computation.
+        - Multichannel images are converted to scalar gradient magnitude via L2 norm.
+        - Markers are computed from minima of the gradient below a percentile threshold.
+        - The core propagation uses `watershed_nd` for ND-compatible flooding.
         """
         # === Detect spatial structure
         spatial_axes = self._get_axes(image)
@@ -1278,7 +1591,37 @@ class SegmenterND(OperatorCore):
         random_state: int = 0,
     ) -> np.ndarray:
         """
-        Train a classical segmenter on 1..N slices and predict across the given axis.
+        Train a classical segmenter (Random Forest) on N slices of an ND feature volume,
+        then predict segmentation labels across all slices along a specified axis.
+
+        Parameters
+        ----------
+        features : np.ndarray
+            ND array of features (e.g., from feature extraction), shape: (..., C, ...).
+        label : np.ndarray
+            Ground-truth label mask corresponding to training slices.
+        axis : int, default 1
+            Axis along which to perform training and prediction (e.g., slice axis).
+        n_train_slices : int, default 1
+            Number of slices (randomly sampled) to use for training the classifier.
+        fuse : bool, default False
+            If True, average predictions from multiple models (probabilistic fusion).
+            If False, use only the first trained segmenter.
+        random_state : int, default 0
+            Seed for reproducibility in slice sampling and model training.
+
+        Returns
+        -------
+        np.ndarray
+            Predicted segmentation volume with same shape as the input (except channel axis removed).
+
+        Notes
+        -----
+        - Uses `RandomForestClassifier` from scikit-learn.
+        - Relies on `skimage.future` utilities for fitting and applying classical models.
+        - Each selected slice trains a model on pixel-wise features and ground-truth labels.
+        - Prediction is done slice-by-slice along the given axis.
+        - Output is reoriented to match the original input layout.
         """
         rng = np.random.default_rng(random_state)
         feats_0 = np.moveaxis(features, axis, 0)
@@ -1319,7 +1662,29 @@ class SegmenterND(OperatorCore):
 
     def _debug_info(self, step_name: str, img, threshold=None) -> None:
         """
-        Print debug information after a segmentation step.
+        Print debug information after a segmentation step if debug mode is enabled.
+
+        Outputs basic statistics (shape, dtype, min/max, unique values) and optionally
+        the threshold used during the step. Compatible with both NumPy and Torch inputs.
+
+        Parameters
+        ----------
+        step_name : str
+            Name of the current processing step (e.g., 'thresholding', 'region growing').
+        img : np.ndarray or torch.Tensor
+            Image or segmentation array to inspect.
+        threshold : float, optional
+            Threshold value used in the step (if any), included in the debug output.
+
+        Returns
+        -------
+        None
+            Prints formatted diagnostic information to stdout.
+
+        Notes
+        -----
+        - Requires `self.segmenter_cfg.debug = True` to activate.
+        - Automatically detects backend (Torch or NumPy) for appropriate inspection.
         """
         if not self.segmenter_cfg.debug:
             return
@@ -1340,24 +1705,40 @@ class SegmenterND(OperatorCore):
             print(f"  → unique values: {np.unique(img)}")
 
 
-def get_nd_neighbors(ndim: int, connectivity: str ="full") -> np.ndarray:
+def get_nd_neighbors(ndim: int, connectivity: str = "full") -> np.ndarray:
     """
-    Generate ND neighbor offsets based on connectivity.
+    Generate offset vectors to enumerate ND neighbors based on a connectivity rule.
+
+    Useful for building structuring elements, region-growing, or adjacency graphs
+    in N-dimensional image processing.
 
     Parameters
     ----------
     ndim : int
-        Number of spatial dimensions.
-    connectivity : str
-        Type of connectivity: 'full', 'face', or 'minimal'.
-        - 'full'   → 3^n - 1 neighbors (includes diagonals)
-        - 'face'   → 2n neighbors (1 step in ± each axis)
-        - 'minimal' → Only the 1-step shifts without diagonals, no opposite pairs.
+        Number of spatial dimensions (e.g., 2 for 2D, 3 for 3D, etc.).
+    connectivity : {'full', 'face', 'minimal'}, default 'full'
+        Type of neighborhood to generate:
+        - 'full'     : All 3^n - 1 surrounding neighbors (includes corners and diagonals).
+        - 'face'     : Only 2n face-connected neighbors (±1 step along each axis).
+        - 'minimal'  : Only n neighbors with a single positive step in each axis.
 
     Returns
     -------
     np.ndarray
-        Array of shape (n_neighbors, ndim) containing all valid offsets.
+        Array of shape (n_neighbors, ndim), where each row is a neighbor offset.
+
+    Raises
+    ------
+    ValueError
+        If the provided connectivity type is not recognized.
+
+    Examples
+    --------
+    >>> get_nd_neighbors(2, 'face')
+    array([[ 1,  0],
+           [-1,  0],
+           [ 0,  1],
+           [ 0, -1]])
     """
     if connectivity == "full":
         offsets = np.array(list(product([-1, 0, 1], repeat=ndim)))
@@ -1401,7 +1782,56 @@ def segmenter_nd(
     n_seeds: int = 5,
 ) -> ArrayLike:
     """
-    Convenience wrapper to build and run SegmenterND.
+    Apply ND segmentation using a preconfigured SegmenterND instance.
+
+    Builds a complete segmentation pipeline from scratch with user-specified
+    parameters and configuration. Supports a wide range of methods (thresholding,
+    region growing, k-means, watershed, etc.), and is compatible with both
+    NumPy and Torch inputs.
+
+    Parameters
+    ----------
+    img : np.ndarray or torch.Tensor
+        Input image or volume to segment (ND format, normalized preferred).
+    segmenter_mode : str, optional
+        Segmentation method to use (e.g., 'otsu', 'kmeans', 'region_growing').
+    threshold : float, optional
+        Threshold value for single-threshold methods (e.g., fixed, iterative).
+    multi_thresholds : list of float, optional
+        List of thresholds for multi-class segmentation.
+    num_classes : int, optional
+        Number of target classes (used in methods like 'multi', 'kmeans').
+    framework : {'numpy', 'torch'}, default 'numpy'
+        Backend framework used for computation.
+    output_format : {'numpy', 'torch'}, default 'numpy'
+        Format of the output segmentation map.
+    layout_name : str, default 'HWC'
+        Mnemonic for layout (e.g., 'HWC', 'NCHW', etc.).
+    layout_framework : {'numpy', 'torch'}, default 'numpy'
+        Framework to resolve layout naming conventions.
+    layout_ensured_name : str, optional
+        Optional expected layout name to enforce.
+    processor_strategy : str, optional
+        Strategy for feature processing (e.g., 'vectorized', 'parallel', 'torch').
+    use_channels : bool, default True
+        Whether to use the channel axis in processing.
+    use_features : bool, default False
+        Whether to use the feature axis in processing.
+    seeds : list of tuple[int, ...], optional
+        Seed points for region-based methods (e.g., region growing).
+    n_seeds : int, default 5
+        Number of random seeds to generate if `seeds` is None.
+
+    Returns
+    -------
+    np.ndarray or torch.Tensor
+        Segmentation result with format and layout resolved accordingly.
+
+    Notes
+    -----
+    - This is a high-level wrapper for `SegmenterND` and associated configs.
+    - Layout, framework, and axis semantics are automatically handled.
+    - Supports both intensity- and feature-based segmentation strategies.
     """
     # ====[ Fallback ]====
     processor_strategy=processor_strategy or "vectorized" if framework == "numpy" else "torch"   

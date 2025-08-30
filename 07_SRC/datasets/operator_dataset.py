@@ -599,7 +599,79 @@ def build_dataset(
     return_transform: bool = False,
 ) -> Union[OperatorDataset, Tuple[OperatorDataset, Any]]:
     """
-    Build an `OperatorDataset` with coherent configs and optional torchvision transforms.
+    Build an `OperatorDataset` with preprocessing and augmentation settings.
+
+    Parameters
+    ----------
+    dir_path : PathLike
+        Root directory containing the input images.
+    images_names : Sequence of str
+        List of image filenames to include in the dataset.
+    labels_dir : PathLike, optional
+        Directory containing ground truth or label images (if any).
+    labels_names : Sequence of str, optional
+        List of label filenames (must align with `images_names`).
+    operator : str, default "paint"
+        Operator applied to each sample ("paint", "blur", "noise", etc.).
+    noise_level : float or tuple, default 0.8
+        Intensity or range of noise to apply to input images.
+    blur_level : float or tuple, default 5.0
+        Intensity or range of blur to apply.
+    mask_threshold : float, default 0.7
+        Threshold used when creating binary masks from degraded images.
+    mask_mode : str, default "grid_noised"
+        Strategy used to build degradation masks.
+    layout_framework : {"numpy", "torch"}, default "numpy"
+        Backend framework assumed for layout resolution.
+    layout_name : str, default "HWC"
+        Initial layout of input images.
+    layout_ensured_name : str, default "NCHW"
+        Layout to enforce before applying transformations.
+    add_batch_dim : bool, default True
+        Whether to add a batch dimension automatically.
+    add_channel_dim : bool or None, optional
+        Whether to add a channel dimension (if not already present).
+    use_transforms : bool, default True
+        Enable torchvision-style data augmentations.
+    stretch : bool, default False
+        Apply histogram stretching to inputs.
+    denoise : bool, default False
+        Enable denoising pre-processing step.
+    aggregate : bool, default False
+        Apply block-wise aggregation (e.g., mean filtering).
+    remove_artifacts : bool, default False
+        Apply artifact removal heuristics.
+    local_contrast : bool, default False
+        Enhance local contrast of the input images.
+    gamma_correct : bool, default False
+        Apply gamma correction to enhance visibility.
+    equalize : bool, default False
+        Apply histogram equalization.
+    size : Tuple[int, int], default (299, 299)
+        Resize target for all images (H, W).
+    horizontal_flip : float, optional
+        Probability of random horizontal flip.
+    vertical_flip : float, optional
+        Probability of random vertical flip.
+    rotation : float, optional
+        Maximum rotation angle (in degrees).
+    brightness : float, optional
+        Brightness adjustment factor.
+    contrast : float, optional
+        Contrast adjustment factor.
+    saturation : float, optional
+        Saturation adjustment factor.
+    to_return : {"untransformed", "transformed", "both"}, default "untransformed"
+        Controls what to return from the dataset: raw, augmented, or both.
+    return_param : bool, default False
+        If True, return parameters used for each transformation.
+    return_transform : bool, default False
+        If True, also return the transform pipeline used.
+
+    Returns
+    -------
+    OperatorDataset or (OperatorDataset, transform)
+        Dataset object, with optional return of the transform pipeline.
     """
     # Apply transforms only if returning transformed data
     use_transforms = bool(use_transforms and to_return != "untransformed")
@@ -665,8 +737,21 @@ def build_dataset(
 # ==================================================
 def safe_collate(batch: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     """
-    Collate function that preserves parameter dictionaries under keys:
-    'params', 'label_params', and any key ending with '_params'.
+    Custom collate function for DataLoader that preserves metadata parameters.
+
+    Specifically, keys like 'params', 'label_params', and any key ending with '_params'
+    are preserved as-is across the batch.
+
+    Parameters
+    ----------
+    batch : Sequence[Mapping[str, Any]]
+        A list of dictionaries representing individual samples.
+
+    Returns
+    -------
+    Dict[str, Any]
+        A dictionary where each key maps to a batched value.
+        Special handling is applied to keys ending with '_params' to keep them unstacked.
     """
     base = default_collate(
         [

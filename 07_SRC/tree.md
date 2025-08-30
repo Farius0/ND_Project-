@@ -14,7 +14,7 @@
 
 - **Backend policy**
   - **Dual-backend compatibility**: all operators support **NumPy** arrays and **PyTorch** tensors.
-  - **Flexible switching**: inputs drive the backend (NumPy in → NumPy out; Torch in → Torch out) with consistent behavior.
+  - **Flexible switching**: inputs drive the backend (NumPy in → NumPy out; Torch in → Torch out, etc.) with consistent behavior.
   - **ND-ready design**: functions are **N-dimensional by design**, with first-class support for **2D** and **3D**; higher dimensions are generally supported when meaningful.
   - **Type/device/layout awareness**: operators preserve dtype and (for Torch) device when feasible; layout handling is centralized via `core/layout_axes.py`.
   - **Conversion layer**: backend interop is handled through the project’s base converters (`BaseConverter` / `OperatorCore`) to avoid user-side boilerplate.
@@ -47,7 +47,9 @@ SRC/
 ├── utils/
 │   ├── decorators.py             # ↪ `TimerManager`, timer, safe_timer_and_debug
 │   ├── labels_tools.py           # ↪ scribble_labels, generate_minimal_scribble
-│   ├── nd_tools.py               # ↪ colormap_picker, show_plane, search_opt_general
+│   ├── nd_tools.py               # ↪ colormap_picker, show_plane
+│   ├── nd_math.py                # ↪ divergence_nd, gradient_nd, laplacian_nd (**experimental**)
+│   ├── segmentations_tools.py    # ↪ slice_sample, filter_outliers_robust,
 │   ├── logger.py                 # ↪ get_logger
 │   ├── emojis.py                 # ↪ emoji handling functions
 │   └── __init__.py
@@ -66,7 +68,7 @@ SRC/
 │   ├── image_operator.py         # ↪ `Operator`, `DeepOperator`
 │   ├── thresholding.py           # ↪ `ThresholdingOperator`
 │   ├── axistracker.py            # ↪ `AxisTracker`
-│   ├── metrics.py                # ↪ `MetricEvaluator` (psnr, mssim, fid, ...)
+│   ├── metrics.py                # ↪ `MetricEvaluator` (psnr, mssim, fid, ...), , search_opt_general
 │   └── __init__.py
 │
 ├── filters/

@@ -20,20 +20,36 @@ DtypeLike = Union[str, type, np.dtype, torch.dtype]
 class EdgeAwareFilter(OperatorCore):
     """
     Edge-aware conductivity function used in anisotropic diffusion.
+
     Supports two modes:
-      - 'pm'  : g(x) = 1 / sqrt(1 + (x/alpha)^2)
-      - 'exp' : g(x) = exp(-(x/alpha)^2)
+      - 'pm'  : g(x) = 1 / sqrt(1 + (x/alpha)^2)      [Perona–Malik]
+      - 'exp' : g(x) = exp(-(x/alpha)^2)              [Exponential decay]
 
     Dual backend (NumPy / Torch), ND-ready via ImageProcessor.
     """
-    def __init__(self,
-                 *,
-                filter_cfg: FilterConfig = FilterConfig(),
-                layout_cfg: LayoutConfig = LayoutConfig(),
-                global_cfg: GlobalConfig = GlobalConfig(),
-                img_process_cfg: ImageProcessorConfig = ImageProcessorConfig(),
-                ):
 
+    def __init__(
+        self,
+        filter_cfg: FilterConfig = FilterConfig(),
+        layout_cfg: LayoutConfig = LayoutConfig(),
+        global_cfg: GlobalConfig = GlobalConfig(),
+        img_process_cfg: ImageProcessorConfig = ImageProcessorConfig(),
+    ):
+        """
+        Initialize an edge-aware filter for use in anisotropic diffusion.
+
+        Parameters
+        ----------
+        filter_cfg : FilterConfig
+            Configuration for the filter mode ('pm' or 'exp') and alpha parameter.
+        layout_cfg : LayoutConfig
+            Layout configuration to ensure consistent axis interpretation.
+        global_cfg : GlobalConfig
+            Global backend and strategy configuration.
+        img_process_cfg : ImageProcessorConfig
+            Image processor configuration for ND handling and parallelism.
+        """
+        
         # ---- Config mirrors ----
         self.layout_cfg: LayoutConfig = layout_cfg
         self.global_cfg: GlobalConfig = global_cfg
@@ -86,8 +102,22 @@ class EdgeAwareFilter(OperatorCore):
 
     def __call__(self, u: ArrayLike) -> ArrayLike:
         """
-        Apply edge-aware filter to `u` and return in the operator's output format.
+        Apply edge-aware filtering to the input image or volume.
+
+        The filter modulates smoothing intensity based on local gradients,
+        preserving sharp edges while reducing noise in homogeneous regions.
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input image or ND volume (NumPy array or PyTorch tensor).
+
+        Returns
+        -------
+        ArrayLike
+            Filtered image or volume in the operator's configured output format.
         """
+
         u = self.convert_once(u)
         tagger = self.track(u)
         result = self._filter(u)
@@ -101,7 +131,20 @@ class EdgeAwareFilter(OperatorCore):
 
     def _filter(self, u: ArrayLike) -> ArrayLike:
         """
-        Internal per-slice/channel filter dispatched through ImageProcessor.
+        Internal edge-aware filtering function applied per channel/slice.
+
+        The method dispatches an edge-preserving non-linear filter (`pm` or `exp` mode)
+        through the `ImageProcessor` to handle ND inputs with flexible layouts.
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input image or ND volume (NumPy array or PyTorch tensor).
+
+        Returns
+        -------
+        ArrayLike
+            Filtered image or volume, optionally cast to a configured dtype.
         """
         def edge_filter(channel: ArrayLike) -> ArrayLike:
             if self.mode not in {"pm", "exp"}:

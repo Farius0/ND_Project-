@@ -44,13 +44,18 @@ Framework = Literal["numpy", "torch"]
 
 class ImageIO(OperatorCore):
     """
-    Unified image reader for common formats (PIL images, DICOM).
-    Inherits from OperatorCore for conversion, tagging, and layout handling.
+    Unified image reader and converter for standard 2D/3D formats.
+
+    Inherits from OperatorCore to enable layout-aware loading, axis tagging,
+    and dual-backend conversion (NumPy ↔ Torch).
 
     Notes
     -----
-    - Dual-backend ready: NumPy in/out, Torch in/out via ensure_format/track.
-    - ND-aware: focuses on 2D/3D images; preserves layout via tags.
+    - Supports standard formats: PNG, JPG, TIFF, DICOM (2D and 3D).
+    - ND-aware: processes both single images and full volumetric stacks.
+    - Dual-backend compatible: returns NumPy arrays or Torch tensors, 
+      preserving dtype, layout, and shape.
+    - Integrates layout and global configuration for consistent preprocessing.
     """
 
     # ====[ INITIALIZATION – ImageIO with full axis support ]====
@@ -60,14 +65,14 @@ class ImageIO(OperatorCore):
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
         """
-        Initialize ImageIO for loading and converting images.
+        Initialize the ImageIO module with layout and global configurations.
 
         Parameters
         ----------
         layout_cfg : LayoutConfig
-            Layout configuration providing axis roles and defaults.
+            Layout configuration with axis naming and semantic roles.
         global_cfg : GlobalConfig
-            Global behavior (framework, device, normalization flags, etc.).
+            Global configuration for backend, device, dtype, and format behavior.
         """
         # === Configuration ===
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -132,25 +137,40 @@ class ImageIO(OperatorCore):
 
     def add_format_handler(self, extension: str, handler_fn: ReadHandler) -> None:
         """
-        Register a new image format handler.
+        Register a custom format handler for loading non-standard image files.
 
         Parameters
         ----------
         extension : str
-            File extension (without dot, e.g., 'nii').
-        handler_fn : (path: str|Path) -> (ndarray, metadata or None)
-            Function that reads a file and returns an image array and optional metadata.
+            File extension (without leading dot), e.g., 'nii', 'mhd', 'tif'.
+        handler_fn : Callable
+            A function that takes a file path and returns a tuple:
+            (image_array, metadata), where metadata can be None.
+
+        Returns
+        -------
+        None
+            The handler is added internally and used automatically on matching file extensions.
         """
         self._handlers[extension.lower()] = handler_fn
 
     def _read_pil(self, path: PathLike) -> Tuple[np.ndarray, None]:
         """
-        Read common image formats via PIL and standardize channels.
+        Read standard 2D image formats (e.g., PNG, JPG, TIFF) using PIL.
+
+        Automatically converts to RGB if a channel axis is expected in the layout.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to the image file.
 
         Returns
         -------
-        (ndarray, None)
-            NumPy array (H, W) for grayscale or (H, W, 3) for color; metadata is None.
+        Tuple[np.ndarray, None]
+            - Image as a NumPy array:
+            (H, W) for grayscale or (H, W, 3) for color.
+            - Metadata is None.
         """
         if self.layout_name:
             if "C" in self.layout_name.upper():
@@ -166,12 +186,27 @@ class ImageIO(OperatorCore):
 
     def _read_dicom(self, path: PathLike) -> Tuple[np.ndarray, Any]:
         """
-        Read DICOM and apply VOI LUT, rescale slope/intercept, and MONOCHROME1 inversion.
+        Read a DICOM file and extract its pixel data as a NumPy array.
+
+        Applies VOI LUT if available. Optionally stores the DICOM metadata
+        for downstream use (e.g., patient info, modality, acquisition params).
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to the DICOM file.
 
         Returns
         -------
-        (ndarray, pydicom.dataset.FileDataset)
-            NumPy float32 array (windowed/rescaled) and the DICOM dataset as metadata.
+        Tuple[np.ndarray, FileDataset]
+            - Image array (typically 2D), cast to NumPy format.
+            - Full DICOM dataset (`pydicom.dataset.FileDataset`) as metadata.
+
+        Notes
+        -----
+        - If VOI LUT (windowing) is defined, it is applied for intensity mapping.
+        - RescaleSlope/Intercept and MONOCHROME1 inversion are currently commented out
+        but can be re-enabled for full grayscale correction.
         """
         ds = pydicom.dcmread(path)
         self._last_metadata = ds
@@ -214,29 +249,46 @@ class ImageIO(OperatorCore):
         trace_limit: int = 10,
     ) -> Union[np.ndarray, torch.Tensor, Tuple[Union[np.ndarray, torch.Tensor], Any]]:
         """
-        Read and prepare an image with optional layout enforcement.
+        Read and convert an image from path or array, with layout enforcement and optional metadata.
+
+        Handles image loading, layout resolution, axis tagging, and UID assignment.
+        Supports post-processing and traceability options.
 
         Parameters
         ----------
         image : str | Path | ndarray | Tensor
-            Input image or file path.
-        return_metadata : bool
-            If True, returns (image, metadata).
+            Image path or in-memory image data to be processed.
+        return_metadata : bool, optional
+            If True, returns a tuple (image, metadata).
         framework : {'torch','numpy'}, optional
-            Target framework.
-        tag_as : str
-            Tag status string.
-        enable_uid : bool
-            Assign UID for traceability.
+            Target backend for the output format. Defaults to `self.framework`.
+        tag_as : str, optional
+            Status tag used for layout/trace tracking (e.g., 'original', 'resized').
+        enable_uid : bool, optional
+            Whether to assign a unique identifier (UID) to the image tag.
         op_params : dict, optional
-            Additional metadata for tagging.
+            Additional metadata to include in the tag (e.g., operation history).
         postprocess_fn : callable, optional
-            Post-processing applied on the converted image.
+            Function applied to the image after conversion and tagging.
+        strict_reset : bool, optional
+            If True, purge all previous tags before processing.
+        require_shape_match : bool, optional
+            Enforce consistency of shape with previous tags (if any).
+        require_layout_match : bool, optional
+            Enforce consistency of layout with expected layout.
+        require_uid : bool or None, optional
+            Override for UID enforcement policy. If None, uses `enable_uid`.
+        track : bool, optional
+            Whether to store tracking metadata in the tag.
+        trace_limit : int, optional
+            Maximum depth of the trace history.
 
         Returns
         -------
-        ndarray | Tensor or (image, metadata)
-            Converted image (and metadata if requested).
+        image : ndarray or Tensor
+            Processed image in the target framework (NumPy or Torch).
+        metadata : optional
+            If `return_metadata` is True, returns the metadata alongside the image.
         """
         metadata = None
         fw = framework or self.framework
@@ -295,41 +347,40 @@ class ImageIO(OperatorCore):
         match_to: Optional[str] = "first",
     ) -> Union[List[Union[np.ndarray, torch.Tensor]], np.ndarray, torch.Tensor]:
         """
-        Load multiple images from disk, optionally resize them to match a reference,
-        and (optionally) stack them into a batch.
+        Load multiple images from disk with optional resizing and batching.
+
+        Supports unified layout conversion, UID tagging, and traceable metadata for each image.
 
         Parameters
         ----------
-        paths : list[str | Path]
-            File paths to images. Must not be empty.
-        to : {'torch','numpy'}, default 'torch'
-            Target backend for returned images. NumPy in → NumPy out; Torch in → Torch out.
+        paths : list of str or Path
+            List of file paths to image files. Must be non-empty.
+        to : {'torch', 'numpy'}, default 'torch'
+            Target backend for output. Determines array type (Torch tensor or NumPy array).
         stack : bool, default True
-            If True, return a single stacked batch (N,C,H,W) (or (N,C,D,H,W) in 3D) when shapes match
-            (or after resizing with `match_to='first'`). If False, return a list of images.
+            If True, stack images into a single ND batch (e.g., (N, C, H, W)).
+            If False, return a list of individual images.
         enable_uid : bool, default True
-            Assign a unique UID to each loaded image and record trace steps in the tag.
+            Assign a unique UID to each image and record layout trace metadata.
         op_params : dict, optional
-            Extra metadata to append in the tag (e.g., {'source':'dataset-A'}).
+            Additional tag metadata to attach to each image (e.g., {'source': 'dataset-A'}).
         match_to : {'first', None}, default 'first'
-            If 'first', resize all subsequent images to match the shape of the first one
-            (spatial dims only). If None, no resizing is performed; stacking will fail
-            if shapes are incompatible.
+            If 'first', resize all images to match the first one (spatial dims only).
+            If None, no resizing is applied; stacking may fail if shapes differ.
 
         Returns
         -------
         list | ndarray | Tensor
-            When `stack=False`, a list of images: each shaped (C,H,W) or (C,D,H,W).
-            When `stack=True`, a single batch tensor/array shaped (N,C,H,W) (or ND).
-            For NumPy, dtype and shape are preserved where feasible.
-            For Torch, dtype and device follow `GlobalConfig` unless specified by the reader.
+            - If `stack=False`: list of images (each shaped (C, H, W) or (C, D, H, W)).
+            - If `stack=True`: single batch array of shape (N, C, H, W) or (N, C, D, H, W),
+            using the target backend (`to`).
 
         Notes
         -----
-        - Layout handling is driven by `LayoutConfig` and `GlobalConfig`.
-        Typical disk layout is HWC for PNG/JPEG; internally we ensure NCHW (if configured).
-        - Resizing policy depends on backend (e.g., bilinear for torch 2D).
-        - Each image carries a tag with UID, layout, and a conversion trace.
+        - Layout and format conversion follow `LayoutConfig` and `GlobalConfig`.
+        Disk formats like HWC (e.g., PNG/JPEG) are internally converted to standard layout.
+        - When resizing is enabled (`match_to='first'`), interpolation mode is backend-specific.
+        - All images are tagged with layout, UID, and transformation trace for reproducibility.
         """
 
         if self.verbose:
@@ -441,25 +492,34 @@ class ImageIO(OperatorCore):
         fname: str = "Poppins-BoldItalic.ttf",
     ) -> np.ndarray:
         """
-        Annotate an image with a given metric (e.g., PSNR) computed against a reference.
+        Annotate an image with a quality metric (e.g., PSNR) computed against a reference.
+
+        Computes the specified metric between the input image and a reference,
+        then overlays the metric value as a text label on the image.
 
         Parameters
         ----------
-        image : ndarray
-            Input image to annotate.
-        reference_image : ndarray
-            Ground-truth reference image.
-        metric : str
-            Metric name to compute and display (default: 'psnr').
-        subfolder : str
-            Path to folder containing the font (relative to project root).
-        fname : str
-            Font filename.
+        image : np.ndarray
+            Image to annotate (typically a predicted or processed version).
+        reference_image : np.ndarray
+            Ground-truth reference image for metric comparison.
+        metric : str, default 'psnr'
+            Metric name to compute and display (e.g., 'psnr', 'ssim', 'mse').
+        subfolder : str, default 'fonts'
+            Relative path to the folder containing the desired font file.
+        fname : str, default 'Poppins-BoldItalic.ttf'
+            Font file to use for drawing the annotation.
 
         Returns
         -------
-        ndarray
-            Image annotated with the computed metric text.
+        np.ndarray
+            Annotated image with the metric label rendered at the bottom-left corner.
+
+        Notes
+        -----
+        - Automatically converts image and reference to uint8 if needed.
+        - Falls back to a default font if the specified font file is not found.
+        - Handles both grayscale and RGB images.
         """
         # === Path Setup ===
         file_path = Path(__file__).parent
@@ -535,28 +595,44 @@ class ImageIO(OperatorCore):
         scale_plot: Tuple[int, int] = (2, 2),
     ) -> None:
         """
-        Save and display sets of images with optional metric annotations and trajectories.
+        Display and optionally save comparison grids of images with annotations and metric plots.
+
+        Shows side-by-side image groups (rows), optionally overlays metric values (e.g. PSNR),
+        and generates a PSNR evolution plot when trajectories are provided.
 
         Parameters
         ----------
         folder : str
-            Target folder for saving the outputs.
+            Target output folder (relative or absolute).
         file_name : str
-            Base name for the saved files.
-        names_list : list[list[str]]
-            Names for titles (one sublist per row).
-        images_list : list[list[ndarray]]
-            Images to display (by row).
-        reference_image_list : list[ndarray], optional
-            Ground-truth per row for metric computation.
-        metric : str
-            Metric to display ('psnr', 'ssim', ...).
+            Base name (without extension) for the saved output files.
+        names_list : list of list of str
+            Titles for each image in each row (e.g., method names).
+        images_list : list of list of ndarray
+            List of image groups to compare. Each sublist represents one row.
+        reference_image_list : list of ndarray, optional
+            One reference image per row (ground truth), used for metric calculation and display.
+        metric : str, default 'psnr'
+            Metric name to compute and annotate (e.g., 'psnr', 'ssim').
         trajectories_list : list, optional
-            Per-row list of per-method trajectories (each: list of ndarrays over time).
-        save : bool
-            If True, save figures to disk.
-        scale_plot : (int, int)
-            Scaling factors for figure size.
+            Per-row list of per-method trajectories, used to compute metric evolution curves.
+        save : bool, default True
+            Whether to save the figure(s) to disk.
+        scale_plot : tuple of int, default (2, 2)
+            Size scaling factors (width, height) for each image in inches.
+
+        Returns
+        -------
+        None
+            Saves image grid and metric plot to disk if `save=True`.
+
+        Notes
+        -----
+        - The output comparison grid is saved as "<file_name>_comparison.png".
+        - The PSNR evolution plot (if `trajectories_list` is provided) is saved as
+        "<file_name>_psnr_plot.png".
+        - All images are normalized to uint8 before display.
+        - Metric annotations are drawn using `treat_image_and_add_metric()`.
         """
         file_path = Path(__file__).parent
         path = str(file_path.parent / folder)
@@ -658,19 +734,31 @@ class ImageIO(OperatorCore):
     # ====[ VALIDATE IMAGE – Safety Check Before Conversion ]====
     def validate_image(self, image: Union[np.ndarray, torch.Tensor], strict: bool = True) -> None:
         """
-        Validate the input image for compatibility and safety.
+        Validate an image's type, shape, and numerical integrity.
+
+        Ensures that the input is a NumPy array or Torch tensor with acceptable dimensions,
+        and contains no NaN or infinite values.
 
         Parameters
         ----------
-        image : ndarray | Tensor
-            Image to validate.
-        strict : bool
-            If True, raise errors; else print warnings.
+        image : ndarray or Tensor
+            Input image to validate.
+        strict : bool, default True
+            If True, raises exceptions on validation failure.
+            If False, prints warnings instead (only if `self.verbose` is True).
 
         Raises
         ------
-        TypeError, ValueError
-            When validation fails (strict=True).
+        TypeError
+            If the input is not a NumPy array or Torch tensor (and strict=True).
+        ValueError
+            If the input has unsupported dimensions or contains NaN/Inf values (and strict=True).
+
+        Notes
+        -----
+        - Supported dimensions: 2D to 5D (inclusive).
+        - Valid dtypes include: uint8, int32, float32, float64.
+        - Verbose mode reports value range for debugging.
         """
         if not isinstance(image, (np.ndarray, torch.Tensor)):
             msg = f"Invalid image type: {type(image)}"
@@ -714,16 +802,32 @@ class ImageIO(OperatorCore):
     # ====[ PREVIEW – Quick Visual Inspection ]====
     def preview(self, image: Union[np.ndarray, torch.Tensor, Any], title: Optional[str] = None, cmap: str = "gray") -> None:
         """
-        Display the image using matplotlib.
+        Display an image using matplotlib with automatic format adjustment.
+
+        Accepts NumPy arrays, Torch tensors, or AxisTracker-like objects
+        and handles layout conversion for visualization safety.
 
         Parameters
         ----------
         image : ndarray | Tensor | AxisTracker-like
-            Image to visualize. AxisTracker must implement .get().
+            Image to display. If an AxisTracker is provided, `.get()` will be called.
         title : str, optional
-            Title to display.
-        cmap : str
-            Colormap for grayscale visualization.
+            Title to display above the image.
+        cmap : str, default 'gray'
+            Colormap used for grayscale display. Ignored for RGB images.
+
+        Raises
+        ------
+        TypeError
+            If input is not a supported image type.
+        ValueError
+            If the image has ambiguous or unsupported shape (e.g., non-displayable 3D tensor).
+
+        Notes
+        -----
+        - CHW → HWC conversion is performed when needed (e.g., for RGB Tensor images).
+        - 2D and RGB/alpha images are supported; full ND volumes are not.
+        - Grayscale images with shape (H, W, 1) are automatically squeezed.
         """
         import matplotlib.pyplot as plt
 
@@ -759,18 +863,40 @@ class ImageIO(OperatorCore):
             plt.imshow(safe_image_to_uint8(arr))
         plt.show()
 
-
 def safe_image_to_uint8(image: np.ndarray) -> np.ndarray:
     """
-    Safe conversion of an image to uint8.
-    Handles NaN/Inf, signed/unsigned integers, and floats outside [0,1].
+    Safely convert an image array to uint8 format for display or saving.
+
+    Handles NaN/Inf values, various integer types, and floats outside the [0, 1] range
+    by applying appropriate normalization or clipping strategies.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Input image (any dtype). Supported types: signed/unsigned integers, floats.
+
+    Returns
+    -------
+    np.ndarray
+        Converted image with dtype uint8, safe for visualization or export.
 
     Notes
     -----
-    - Integers:
-      * Signed → local min–max normalization to [0, 255].
-      * Unsigned → scale if bit-depth > 8, else clip to [0, 255].
-    - Floats: if outside [0, 1], local min–max normalize to [0, 1] first.
+    - NaN and infinite values are replaced with 0.
+    - Integer types:
+        * Signed integers: min–max normalized to [0, 255].
+        * Unsigned integers:
+            - If bit-depth > 8 (e.g., uint16), scale to 8-bit.
+            - Otherwise, clip to [0, 255].
+    - Float types:
+        * If values are outside [0, 1], perform local min–max normalization.
+        * Final values are clipped to [0, 1] before scaling to [0, 255].
+
+    Examples
+    --------
+    >>> safe_image_to_uint8(np.array([[0.0, 1.0], [0.5, 0.75]]))
+    array([[  0, 255],
+           [127, 191]], dtype=uint8)
     """
     img = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
 

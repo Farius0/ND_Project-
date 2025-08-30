@@ -16,18 +16,60 @@ ArrayLike = Union[ArrayNP, ArrayTorch]
 Framework = Literal["numpy", "torch"]
 
 # ---  Utils ---
-
 def _is_float_dtype_np(dtype: np.dtype) -> bool:
+    """
+    Check if a NumPy dtype is a floating-point type.
+
+    Parameters
+    ----------
+    dtype : np.dtype
+        NumPy data type to check.
+
+    Returns
+    -------
+    bool
+        True if the dtype is a float type, False otherwise.
+    """
     return np.issubdtype(dtype, np.floating)
 
 
 def _ensure_float_numpy(arr: ArrayNP) -> ArrayNP:
-    """Return a floating array (preserve float dtype, else cast to float32)."""
+    """
+    Ensure that a NumPy array has a floating-point dtype.
+
+    If the input already has a float dtype, it is returned as-is.
+    Otherwise, it is cast to float32 without copying if possible.
+
+    Parameters
+    ----------
+    arr : ArrayNP
+        Input NumPy array.
+
+    Returns
+    -------
+    ArrayNP
+        Float array, with dtype preserved or cast to float32.
+    """
     return arr if _is_float_dtype_np(arr.dtype) else arr.astype(np.float32, copy=False)
 
 
 def _ensure_float_torch(t: ArrayTorch) -> ArrayTorch:
-    """Return a floating tensor (preserve float dtype, else cast to float32)."""
+    """
+    Ensure that a PyTorch tensor has a floating-point dtype.
+
+    If the input is already a floating-point tensor, it is returned as-is.
+    Otherwise, it is cast to float32.
+
+    Parameters
+    ----------
+    t : ArrayTorch
+        Input PyTorch tensor.
+
+    Returns
+    -------
+    ArrayTorch
+        Float tensor, with dtype preserved or cast to float32.
+    """
     return t if t.is_floating_point() else t.to(dtype=torch.float32)
 
 # def _np_broadcastable(shape_a: Tuple[int, ...], shape_b: Tuple[int, ...]) -> bool:

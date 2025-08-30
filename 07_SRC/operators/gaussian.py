@@ -26,9 +26,25 @@ Framework = Literal["numpy", "torch"]
 
 class NDConvolver(OperatorCore):
     """
-    ND convolution with multiple strategies (FFT, ndimage, uniform, gaussian,
-    median, torch, convolve2d, gaussian_torch). Works with ND/chan/batch via
-    ImageProcessor, preserving backend (NumPy/Torch) and tags.
+    N-dimensional convolution module supporting multiple strategies.
+
+    Provides flexible convolution across ND arrays with optional batching and
+    channel-awareness. Automatically dispatches to backend-specific routines 
+    (NumPy or Torch) and preserves axis tags via OperatorCore.
+
+    Supported convolution modes include:
+    - 'fft' (scipy FFT convolution)
+    - 'ndimage' (scipy.ndimage.convolve)
+    - 'uniform', 'gaussian', 'median' (SciPy filters)
+    - 'torch' (native PyTorch convolution)
+    - 'convolve2d' (SciPy 2D only)
+    - 'gaussian_torch' (custom torch-based Gaussian)
+
+    Notes
+    -----
+    - Compatible with images of arbitrary shape: 2D, 3D, ND.
+    - Layout and axis semantics are managed via `LayoutConfig`.
+    - Uses `ImageProcessor` internally to support channel-wise processing and batch handling.
     """
 
     def __init__(
@@ -39,9 +55,18 @@ class NDConvolver(OperatorCore):
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
         """
-        NDConvolver supports FFT, ndimage, uniform, gaussian, median and torch convolution strategies.
-        Uses ImageProcessor for slice-wise or channel-wise ND processing.
+        Initialize NDConvolver with configurable convolution behavior.
 
+        Parameters
+        ----------
+        ndconvolver_cfg : NDConvolverConfig
+            Strategy and kernel parameters (e.g., conv_strategy='fft', sigma, padding mode, etc.).
+        img_process_cfg : ImageProcessorConfig
+            ImageProcessor backend to control parallelization, channel-slicing, etc.
+        layout_cfg : LayoutConfig
+            Layout handling for semantic axis detection (e.g., channel_axis).
+        global_cfg : GlobalConfig
+            Framework-level options (backend, dtype, device, normalization).
         """
         # ====[ Configuration ]====
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -113,25 +138,43 @@ class NDConvolver(OperatorCore):
         op_params: Optional[dict] = None,
     ) -> ArrayLike:
         """
-        Apply ND convolution using the configured strategy.
+        Apply N-dimensional convolution using the configured strategy.
+
+        Supports multiple convolution modes (FFT, Gaussian, median, torch, etc.)
+        and applies them to the given input using `ImageProcessor` for backend-aware
+        and layout-consistent processing.
 
         Parameters
         ----------
-        image : ndarray | Tensor
-            Input image.
-        kernel : ndarray | Tensor
-            Convolution kernel (compatible with selected backend).
+        image : np.ndarray or torch.Tensor
+            Input image to convolve.
+        kernel : np.ndarray or torch.Tensor
+            Convolution kernel. Should match the framework of the image.
         size : int, optional
-            Window size for uniform/median filters if needed.
+            Window size for strategies like 'uniform' or 'median' (used when no kernel is given).
         sigma : float, default 1.0
-            Std for Gaussian filtering strategies.
+            Standard deviation for Gaussian filtering.
         mode : str, default 'reflect'
-            Border handling for ndimage strategies.
+            Border mode for strategies like 'ndimage' (e.g., 'reflect', 'nearest').
+        enable_uid : bool, default False
+            Whether to assign a UID for traceability in the tag.
+        track : bool, default True
+            If True, maintain operation history and metadata tracking.
+        trace_limit : int, default 10
+            Maximum number of operations to store in the trace tag.
+        op_params : dict, optional
+            Additional metadata to embed in the tag (e.g., {'sigma': 1.0, 'mode': 'fft'}).
 
         Returns
         -------
-        ndarray | Tensor
-            Convolved output, tagged and formatted via OperatorCore.
+        np.ndarray or torch.Tensor
+            Convolved output in the same backend as the input, with tags preserved.
+
+        Notes
+        -----
+        - Input and kernel are automatically converted to the target framework.
+        - Layout and channel handling are managed internally via `OperatorCore`.
+        - Output is returned via `to_output()` with tagging and optional UID.
         """
         image_tracked = self.convert_once(
             image,
@@ -171,17 +214,29 @@ class NDConvolver(OperatorCore):
     # ====[ Private methods ]====    
     def _get_axes(self, arr: ArrayLike) -> List[int]:
         """
-        Determine the spatial axes to apply differential operators on.
+        Determine the spatial axes to apply differential or convolution operators.
+
+        Excludes non-spatial axes such as channel, batch, or direction axes,
+        based on tags or internal axis configuration. Handles negative indices
+    and missing tags gracefully.
 
         Parameters
         ----------
-        arr : np.ndarray | torch.Tensor
-            Input image or tensor.
+        arr : np.ndarray or torch.Tensor
+            Input ND array or tensor to analyze.
 
         Returns
         -------
-        axes : list[int]
-            List of axes eligible for gradient/divergence computation.
+        List[int]
+            List of spatial axis indices eligible for processing.
+
+        Notes
+        -----
+        - For 2D images, returns [0, 1] by default.
+        - Axis roles are retrieved from image tags if available; otherwise falls back
+        to `self.axes` (from layout config).
+        - Negative axes are converted to positive values based on `arr.ndim`.
+        - Verbose mode prints selected spatial axes.
         """
         ndim = arr.ndim
         axes = list(range(ndim))
@@ -218,25 +273,46 @@ class NDConvolver(OperatorCore):
         mode: str = "reflect",
     ) -> ArrayLike:
         """
-        Dispatch the appropriate convolution strategy and process the image.
+        Dispatch and apply the configured convolution strategy on an ND image.
+
+        Supports a wide range of strategies including FFT, Gaussian, median, uniform,
+        PyTorch-based, and hybrid approaches with automatic fallback.
 
         Parameters
         ----------
-        image : np.ndarray | torch.Tensor
-            Input image.
-        kernel : np.ndarray | torch.Tensor
-            Convolution kernel.
-        sigma : float
-            Gaussian kernel sigma.
-        size : int
-            Median kernel size.
-        mode : str
-            Convolution mode.
+        image : np.ndarray or torch.Tensor
+            Input image to convolve.
+        kernel : np.ndarray or torch.Tensor
+            Convolution kernel. May be ignored in strategies like 'uniform' or 'median'.
+        sigma : float, default 1.0
+            Standard deviation for Gaussian-based filters.
+        size : int, optional
+            Filter window size (used in 'uniform', 'median', or Gaussian).
+            If None, defaults to 2*floor(3*sigma)+1.
+        mode : str, default 'reflect'
+            Border handling mode for scipy filters (e.g., 'reflect', 'nearest').
 
         Returns
         -------
-        result : np.ndarray | torch.Tensor
-            Convolved image.
+        np.ndarray or torch.Tensor
+            Convolved image, with same backend as the input and layout preserved.
+
+        Raises
+        ------
+        ValueError
+            If the selected strategy is not supported or kernel is incompatible.
+        RuntimeError
+            If the convolution process fails due to execution errors.
+
+        Notes
+        -----
+        - Strategy is defined in `self.strategy` and must be one of:
+        'fft', 'ndimage', 'uniform', 'gaussian', 'median', 'torch',
+        'convolve2d', 'gaussian_torch'.
+        - For large kernels and 'torch' strategy, the method auto-switches to a fallback
+        (e.g., 'fft' or 'gaussian') for performance and memory safety.
+        - Spatial axes are resolved via `_get_axes()` using tag or layout configuration.
+        - Internally delegates to `self.processor` for ND-slicing and framework handling.
         """
         if image.ndim < kernel.ndim:
             raise ValueError("[NDConvolver] Kernel has more dimensions than image.")
@@ -322,23 +398,35 @@ class NDConvolver(OperatorCore):
     # ====[ Torch-based convolution wrapper ]====
     def _torch_convolve(self, kernel: ArrayLike) -> Callable[[ArrayLike], ArrayLike]:
         """
-        Build a Torch-compatible convolution closure for ND slices, supporting:
-        - 2D image (H,W)  -> conv2d with [1,1,Kh,Kw]
-        - 3D no-channel (D,H,W) -> conv3d with [1,1,Kd,Kh,Kw]
-        - 3D with channels (C,H,W) -> conv2d(groups=C)
-        - 4D with channels (C,D,H,W) -> conv3d(groups=C)
+        Build a Torch-native convolution closure for ND inputs (2D or 3D), with or without channels.
 
-        Channel is internally moved to dim=0 when present, and moved back before return.
+        Supports grouped and ungrouped convolutions, and handles different axis layouts
+        transparently (based on tagged channel_axis). Internally reshapes tensors to match
+        PyTorch's expected (N,C,...) format, applies convolution, then restores original layout.
 
         Parameters
         ----------
-        kernel : np.ndarray | torch.Tensor
-            Kernel to apply.
+        kernel : np.ndarray or torch.Tensor
+            Convolution kernel to use. Shape must match the spatial dimensions (2D or 3D).
 
         Returns
         -------
-        convolve_fn : callable
-            Callable function that takes a slice and applies convolution.
+        convolve_fn : Callable[[ArrayLike], ArrayLike]
+            A callable function that accepts a tensor slice and returns the convolved output.
+
+        Supported Cases
+        ---------------
+        - 2D image          : (H, W)               → conv2d with [1, 1, Kh, Kw]
+        - 3D image no ch.   : (D, H, W)            → conv3d with [1, 1, Kd, Kh, Kw]
+        - 3D image w/ ch.   : (C, H, W)            → conv2d with groups=C if `grouped=True`
+        - 4D image w/ ch.   : (C, D, H, W)         → conv3d with groups=C if `grouped=True`
+
+        Notes
+        -----
+        - Input is automatically cast to float32 and moved to the configured device.
+        - Kernel is repeated or expanded depending on grouping strategy.
+        - Padding is automatically computed to preserve input size (`same` padding).
+        - Raises ValueError for unsupported input dimensions.
         """
         @torch.no_grad()
         def convolve_slice(x: ArrayLike) -> ArrayLike:
@@ -396,17 +484,32 @@ class NDConvolver(OperatorCore):
     # ====[ Auto-padding calculation ]====
     def _auto_padding(self, kernel_shape: Tuple[int, ...]) -> Tuple[int, ...]:
         """
-        Compute convolution padding from kernel shape and selected padding mode.
+        Compute padding values for convolution based on kernel shape and padding mode.
+
+        Supports scalar, tuple, and named padding modes ('same', 'valid', 'full') for N-dimensional kernels.
 
         Parameters
         ----------
-        kernel_shape : tuple[int]
-            Shape of the kernel in spatial dimensions (e.g., (3, 3) or (5, 5, 5)).
+        kernel_shape : tuple of int
+            Shape of the convolution kernel along spatial dimensions (e.g., (3, 3) for 2D, (5, 5, 5) for 3D).
 
         Returns
         -------
-        padding : tuple[int]
-            Padding per dimension.
+        Tuple[int, ...]
+            Per-dimension padding values to apply on each spatial axis.
+
+        Raises
+        ------
+        ValueError
+            If the padding mode is invalid or inconsistent with kernel shape.
+
+        Supported Modes
+        ---------------
+        - int            : Applies same integer padding to all dimensions.
+        - tuple/list     : Custom per-axis padding (must match kernel dimensions).
+        - 'same'         : Auto-padding to preserve input shape (padding = kernel_size // 2).
+        - 'valid'        : No padding (all padding = 0).
+        - 'full'         : Maximal padding (padding = kernel_size - 1).
         """
         if isinstance(self.padding, int):
             return tuple([self.padding] * len(kernel_shape))
@@ -452,24 +555,37 @@ class NDConvolver(OperatorCore):
 # ==================================================
 class GaussianKernelGenerator(OperatorCore):
     """
-    Generate Gaussian kernels in ND (or 2D with rotation), compatible with NumPy and Torch.
+    Generate N-dimensional (or 2D rotated) Gaussian kernels for convolution.
+
+    Compatible with both NumPy and PyTorch backends, this utility constructs
+    isotropic or anisotropic Gaussian kernels, with optional rotation (2D only),
+    symmetry enforcement, and dtype/device handling via `GlobalConfig`.
 
     Notes
     -----
-    - Normalization optional via GlobalConfig.normalize.
-    - 2D rotation uses an angle in degrees; symmetry averaging available.
+    - Outputs are backend-aware and layout-consistent.
+    - If `global_cfg.normalize=True`, the kernel is L1-normalized.
+    - For 2D kernels, a rotation angle (in degrees) can be specified.
+    - If `ndconvolver_cfg.symmetry=True`, the kernel is averaged across symmetric axes.
     """
 
     def __init__(
         self,
-        *,
         ndconvolver_cfg: NDConvolverConfig = NDConvolverConfig(),
         layout_cfg: LayoutConfig = LayoutConfig(),
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
         """
-        Initialize a GaussianKernelGenerator for ND kernel construction.
+        Initialize the GaussianKernelGenerator with configurable convolution settings.
 
+        Parameters
+        ----------
+        ndconvolver_cfg : NDConvolverConfig
+            Controls the convolution dimensions, kernel size, sigma, symmetry, and backend mode.
+        layout_cfg : LayoutConfig
+            Provides layout information for interpreting spatial axes.
+        global_cfg : GlobalConfig
+            Controls backend preferences, normalization, and device placement.
         """
         # ====[ Configuration ]====
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -527,37 +643,50 @@ class GaussianKernelGenerator(OperatorCore):
         visualize: bool = False,
         return_grid: bool = False,
         return_numpy: bool = False,
-    )-> ArrayLike:
+    ) -> ArrayLike:
         """
-        Generate a Gaussian kernel in arbitrary dimension.
+        Generate a Gaussian kernel in N dimensions (or 2D with optional rotation).
+
+        The kernel can be isotropic or anisotropic, and supports optional visualization,
+        symmetry enforcement, and coordinate grid return for 2D cases.
 
         Parameters
         ----------
-        dim : int
-            Dimension of the kernel (e.g., 2 for 2D).
-        size : int or list[int]
-            Kernel size per dimension. If None, inferred from sigma and truncate.
-        sigma : float or list[float]
-            Standard deviation(s) of the Gaussian.
-        truncate : float
-            Controls the spatial extent of the kernel (in std dev units).
-        symmetry : bool
-            Enforce symmetry by averaging with its mirror.
-        angle : float
-            Angle (in degrees) for rotation in 2D.
-        visualize : bool
-            If True, plot the kernel (only if dim==2).
-        return_grid : bool
-            If True, return the coordinate grid used (2D only).
-        return_numpy : bool
-            If True, return kernel as NumPy array.
+        dim : int, default 2
+            Dimension of the kernel (e.g., 2 for 2D, 3 for 3D).
+        size : int or list of int, optional
+            Kernel size per dimension. Must be odd. If None, computed from `sigma` and `truncate`.
+        sigma : float or list of float, default 1.0
+            Standard deviation(s) of the Gaussian function.
+        truncate : float, default 3.0
+            Radius in standard deviations beyond which the kernel is truncated.
+        symmetry : bool, default True
+            Enforce symmetry by averaging the kernel with its mirror.
+        angle : float, default 0.0
+            Rotation angle in degrees (only used when `dim == 2`).
+        visualize : bool, default False
+            If True, display a 2D plot of the kernel (only if `dim == 2`).
+        return_grid : bool, default False
+            If True, return the (X, Y) grid used to build the 2D rotated kernel.
+        return_numpy : bool, default False
+            If True, return the kernel as a NumPy array (else Torch tensor).
 
         Returns
         -------
-        kernel : torch.Tensor | np.ndarray
+        kernel : torch.Tensor or np.ndarray
             The generated Gaussian kernel.
-        grid : tuple (X_rot, Y_rot), optional
-            Only for dim=2 and return_grid=True.
+        grid : tuple of arrays, optional
+            The (X_rot, Y_rot) coordinate grid, only returned if `return_grid=True` and `dim == 2`.
+
+        Raises
+        ------
+        ValueError
+            If the dimension, sigma, or size arguments are invalid or inconsistent.
+
+        Notes
+        -----
+        - For 2D kernels with rotation, symmetry enforcement may be affected if angle ≠ 0.
+        - Kernel is auto-tagged and formatted via `to_output()`, and cast to the desired backend.
         """
         if dim < 1:
             raise ValueError("Dimension must be ≥ 1.")
@@ -599,28 +728,38 @@ class GaussianKernelGenerator(OperatorCore):
 
         return (kernel, grid) if return_grid and grid is not None else kernel
 
-    def _generate_2d(self, size: int, sigma: float, symmetry: bool = True, angle: float = 0.0)-> ArrayLike:
-
+    def _generate_2d(self, size: int, sigma: float, symmetry: bool = True, angle: float = 0.0) -> ArrayLike:
         """
-        Generate a 2D Gaussian kernel, optionally rotated and symmetrized.
+        Generate a 2D Gaussian kernel with optional rotation and symmetry enforcement.
+
+        Constructs a 2D isotropic Gaussian filter, rotates the coordinate grid if needed,
+        and symmetrizes the result by averaging it with its mirror. Supports both NumPy
+        and Torch backends, and preserves data layout and dtype via `to_output()`.
 
         Parameters
         ----------
         size : int
-            Kernel size (must be odd).
+            Size of the kernel (must be a positive odd integer).
         sigma : float
-            Standard deviation of the Gaussian.
-        symmetry : bool
-            If True, average the kernel with its mirror.
-        angle : float
-            Rotation angle in degrees (applied to 2D grid).
+            Standard deviation of the Gaussian distribution.
+        symmetry : bool, default True
+            If True, average the kernel with its flipped version to enforce symmetry.
+        angle : float, default 0.0
+            Rotation angle in degrees applied to the 2D grid before computing the kernel.
 
         Returns
         -------
-        kernel : tensor or ndarray
-            The resulting 2D Gaussian kernel.
-        grid : tuple
-            Rotated coordinate grid (X_rot, Y_rot)
+        kernel : torch.Tensor or np.ndarray
+            The generated 2D Gaussian kernel, with dtype and backend matching configuration.
+        grid : tuple of arrays
+            The rotated coordinate grid (X_rot, Y_rot), useful for visualization or analysis.
+
+        Notes
+        -----
+        - The kernel is normalized to sum to 1 if `self.normalize=True` in `GlobalConfig`.
+        - Rotation is applied before computing the Gaussian values, not by rotating the kernel post hoc.
+        - The use of symmetry + rotation may slightly distort isotropy (warning is issued).
+        - Output is tagged with `tag_as='gaussian'` and passed through `to_output()`.
         """
         theta = math.radians(angle)
         var = sigma ** 2
@@ -658,21 +797,32 @@ class GaussianKernelGenerator(OperatorCore):
             kernel = kernel.astype(self.dtype_numpy, copy=False)
             return self.to_output(kernel, tag_as="gaussian"), (X_rot, Y_rot)
 
-    def _generate_nd(self, size: List[int], sigma: List[float])-> ArrayLike:
+    def _generate_nd(self, size: List[int], sigma: List[float]) -> ArrayLike:
         """
-        Generate a normalized ND Gaussian kernel.
+        Generate an N-dimensional isotropic or anisotropic Gaussian kernel.
+
+        Constructs a normalized ND Gaussian kernel by evaluating the Gaussian
+        function across a multi-dimensional grid. Supports both NumPy and PyTorch backends.
 
         Parameters
         ----------
-        size : list[int]
-            Size of the kernel in each dimension.
-        sigma : list[float]
-            Standard deviation per dimension.
+        size : list of int
+            Kernel size per dimension. Each value must be a positive odd integer.
+        sigma : list of float
+            Standard deviation of the Gaussian along each dimension. Must match `size` in length.
 
         Returns
         -------
-        kernel : torch.Tensor or np.ndarray
-            ND Gaussian kernel.
+        kernel : np.ndarray or torch.Tensor
+            The generated Gaussian kernel with shape defined by `size`, and dtype/device
+            matching backend configuration. Automatically tagged as `'gaussian'`.
+
+        Notes
+        -----
+        - If `self.normalize=True`, the kernel is scaled to sum to 1.
+        - Very small kernel sums (< 1e-8) trigger a warning and skip normalization.
+        - Values are clamped to avoid numerical overflow in exponentials (e.g., exp(-x^2)).
+        - Returned kernel is ND-compatible and can be used in convolution pipelines.
         """
         if self.framework == "torch":
             with torch.no_grad():
@@ -718,10 +868,24 @@ class GaussianKernelGenerator(OperatorCore):
         """
         Visualize a 2D Gaussian kernel using matplotlib.
 
+        Converts the input to a NumPy array if needed and displays it as a heatmap.
+
         Parameters
         ----------
-        kernel : torch.Tensor | np.ndarray
-            Kernel to visualize. Must be 2D.
+        kernel : torch.Tensor or np.ndarray
+            2D kernel to visualize. Must have exactly 2 dimensions.
+
+        Raises
+        ------
+        TypeError
+            If the input is not a NumPy array or torch.Tensor.
+        
+        Notes
+        -----
+        - If the input is a torch.Tensor, it is detached and moved to CPU.
+        - If the kernel is not 2D, a warning is printed and nothing is shown.
+        - Uses 'viridis' colormap and adds a colorbar.
+        - Intended for debugging or inspection purposes only.
         """
         if isinstance(kernel, torch.Tensor):
             kernel = kernel.detach().cpu().numpy()
@@ -774,14 +938,53 @@ def conv(
     processor_strategy: Optional[str] = "vectorized",
     layout_framework: Framework = "numpy",
     layout_name: str = "HWC",
-    ) -> Tuple[ArrayLike, ArrayLike]:
+) -> Tuple[ArrayLike, ArrayLike]:
     """
-    Convenience front-end for generating a Gaussian kernel and convolving an image.
+    Generate a Gaussian kernel and apply ND convolution to an image.
+
+    This utility wraps `GaussianKernelGenerator` and `NDConvolver` with automatic
+    configuration of layout, backend, and processing strategy. Useful for quick
+    application of spatial filtering in 2D or 3D.
+
+    Parameters
+    ----------
+    img : np.ndarray or torch.Tensor
+        Input image to convolve.
+    dim : int
+        Dimensionality of the Gaussian kernel (e.g., 2 or 3).
+    size : int
+        Size of the kernel (must be odd).
+    sigma : float
+        Standard deviation of the Gaussian.
+    angle : float
+        Rotation angle in degrees (used only for 2D kernels).
+    framework : {'numpy', 'torch'}, default 'numpy'
+        Backend for internal processing and kernel generation.
+    output_format : {'numpy', 'torch'}, default 'numpy'
+        Format of the returned result (same options as `framework`).
+    backend : str, default 'sequential'
+        Processing backend used by `ImageProcessor`.
+    conv_strategy : str, optional
+        Convolution strategy ('fft', 'torch', 'ndimage', etc.). Auto-selected by default.
+    processor_strategy : str, optional
+        Processor dispatch mode ('vectorized', 'parallel', etc.). Auto-selected by default.
+    layout_framework : {'numpy', 'torch'}, default 'numpy'
+        Framework used to interpret layout names.
+    layout_name : str, default 'HWC'
+        Layout string describing axis ordering of the input image.
+
+    Returns
+    -------
+    convolved : np.ndarray or torch.Tensor
+        Convolved image with the same backend as specified.
+    kernel : np.ndarray or torch.Tensor
+        The Gaussian kernel used for the convolution.
 
     Notes
     -----
-    - `conv_strategy` defaults to 'fft' for NumPy, 'torch' for Torch.
-    - `processor_strategy` defaults to 'vectorized' for NumPy, 'torch' for Torch.
+    - `conv_strategy` defaults to 'fft' for NumPy and 'torch' for Torch.
+    - `processor_strategy` defaults to 'vectorized' for NumPy and 'torch' for Torch.
+    - Internally sets up `NDConvolver` and `GaussianKernelGenerator` with layout/tag support.
     """
     # ====[ Fallback ]====
     conv_strategy=conv_strategy or "fft" if framework == "numpy" else "torch"

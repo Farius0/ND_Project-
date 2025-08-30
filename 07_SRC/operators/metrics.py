@@ -13,7 +13,6 @@ import numpy as np
 import itertools
 import torch
 
-
 from operators.image_processor import ImageProcessor
 from core.base_converter import BaseConverter
 from core.config import LayoutConfig, GlobalConfig, ImageProcessorConfig

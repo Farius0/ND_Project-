@@ -39,7 +39,6 @@ class EdgeDetector(OperatorCore):
 
     def __init__(
         self,
-        *,
         edge_detector_cfg: EdgeDetectorConfig = EdgeDetectorConfig(),
         diff_operator_cfg: DiffOperatorConfig = DiffOperatorConfig(),
         ndconvolver_cfg: NDConvolverConfig = NDConvolverConfig(),
@@ -47,6 +46,28 @@ class EdgeDetector(OperatorCore):
         layout_cfg: LayoutConfig = LayoutConfig(),
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
+        """
+        Initialize the EdgeDetector module with configurable components.
+
+        Parameters
+        ----------
+        edge_detector_cfg : EdgeDetectorConfig
+            Parameters controlling edge detection logic (strategy, thresholds, float output, etc.).
+        diff_operator_cfg : DiffOperatorConfig
+            Configuration for finite difference operators (gradient, divergence, etc.).
+        ndconvolver_cfg : NDConvolverConfig
+            Configuration for ND convolution backends (e.g., Gaussian, Laplacian filters).
+        img_process_cfg : ImageProcessorConfig
+            Preprocessing and data handling settings (conversion, parallelism).
+        layout_cfg : LayoutConfig
+            Axis layout mapping and naming (e.g., HWC, ZYX) for ND support.
+        global_cfg : GlobalConfig
+            Backend engine, output format, and device management (NumPy/Torch).
+
+        Returns
+        -------
+        None
+        """
 
         # ====[ Configuration ]====
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -74,11 +95,13 @@ class EdgeDetector(OperatorCore):
         self.eta: Optional[Union[str, float]] = self.edge_detect_cfg.eta
         self.as_float: bool = bool(self.edge_detect_cfg.as_float)
         self.dtype: Optional[Union[type, str]] = self.edge_detect_cfg.dtype 
+        self.dtype_numpy: Optional[type] = np.float32
+        self.dtype_torch: Optional[type] = torch.float
         self.mode: str = self.edge_detect_cfg.mode
         self.alpha: float = float(self.edge_detect_cfg.alpha)
         self.threshold: Optional[Union[str, float]] = self.edge_detect_cfg.threshold
         self.complete_nms: bool = bool(self.edge_detect_cfg.complete_nms)
-        self.use_paddingbool = bool(self.edge_detect_cfg.use_padding)
+        self.use_padding: bool = bool(self.edge_detect_cfg.use_padding)
     
         # ====[ Mirror inherited params locally for easy access ]====
         self.framework: Framework = self.global_cfg.framework.lower()
@@ -158,23 +181,64 @@ class EdgeDetector(OperatorCore):
 
     def __call__(self, u: ArrayLike) -> ArrayLike:
         """
-        Run the configured edge detector on an input image/tensor.
+        Apply the configured edge detection strategy to an input image or volume.
+
+        Handles backend conversion, layout tracking, and tag propagation.
 
         Parameters
         ----------
-        u : ndarray | Tensor
-            Input image/volume.
+        u : ArrayLike
+            Input image or volume (NumPy or Torch array). Can be 2D or ND.
 
         Returns
         -------
-        ndarray | Tensor
-            Edge map in the same backend, tagged with status='edges'.
+        ArrayLike
+            Output edge map in the same backend (NumPy or Torch),
+            tagged with status="edges" and updated layout metadata.
+
+        Notes
+        -----
+        - This is the main entry point for running edge detection.
+        - Calls the internal `_detect()` method based on configuration.
+        - Preserves input type and tags via `to_output()`.
         """
         u = self.convert_once(u, tag_as="input")
         result = self._detect(u)
         return self.to_output(result, tag_as="edges")
 
     def _detect(self, u: ArrayLike) -> ArrayLike:
+        """
+        Dispatch edge detection to the appropriate internal method.
+
+        Uses the `self.method` attribute (from configuration) to select the
+        detection strategy, then applies it to the input image or volume.
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input image or volume (NumPy or Torch array).
+
+        Returns
+        -------
+        ArrayLike
+            Result of the selected edge detection strategy.
+
+        Raises
+        ------
+        ValueError
+            If `self.method` is not a recognized edge detection strategy.
+
+        Notes
+        -----
+        Supported methods:
+            - "gradient"
+            - "sobel_gradient"
+            - "sign_change"
+            - "laplacian"
+            - "combined"
+            - "marr_hildreth"
+            - "canny"
+        """
         methods = {
             "gradient"     : self._gradient_edges,
             "sobel_gradient": self._gradient_edges,
@@ -193,7 +257,32 @@ class EdgeDetector(OperatorCore):
         return methods[self.method](u)
     
     # -------- Gradient-based edges --------
-    def _gradient_edges(self, image: ArrayLike, gradient: str = "classic") -> ArrayLike:        
+    def _gradient_edges(self, image: ArrayLike, gradient: str = "classic") -> ArrayLike:
+        """
+        Detect edges using gradient-based methods (NumPy or Torch).
+
+        Selects the appropriate gradient computation backend and delegates the operation
+        to a preconfigured image processor.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image or volume (NumPy or Torch array).
+        gradient : {"classic", "sobel"}, optional
+            Type of gradient to compute. Default is "classic". If "sobel",
+            uses Sobel-based gradient computation.
+
+        Returns
+        -------
+        ArrayLike
+            Binary or float-valued edge map (same backend as input).
+            Tagging and layout are preserved.
+        
+        Notes
+        -----
+        - Dispatches to `_detect_edges_numpy` or `_detect_edges_torch`.
+        - Uses `ImageProcessor` wrapper with `self.processor.function`.
+        """
         partial_func = partial(self._detect_edges_numpy, gradient=gradient) if self.framework == "numpy" \
             else partial(self._detect_edges_torch, gradient=gradient)
         
@@ -203,7 +292,31 @@ class EdgeDetector(OperatorCore):
     
     def _detect_edges_numpy(self, image: np.ndarray, gradient: str = "classic") -> np.ndarray:
         """
-        Compute edge map from gradient magnitude with Otsu/eta threshold.
+        Compute edge map from gradient magnitude using NumPy backend.
+
+        Applies a specified gradient method, computes the L2 magnitude, and thresholds
+        the result using Otsu or a user-defined eta value.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            Input image or volume as a NumPy array.
+        gradient : {"classic", "sobel"}, optional
+            Type of gradient to compute. Default is "classic".
+            - "classic": finite differences
+            - "sobel": Sobel filter approximation
+
+        Returns
+        -------
+        np.ndarray
+            Binary or float-valued edge map with updated tags and preserved layout.
+
+        Notes
+        -----
+        - Uses `self.diff` for gradient computation and spacing-aware handling.
+        - Thresholding is performed using Otsu if `eta="otsu"` or a fixed value otherwise.
+        - Output dtype is controlled by `self.as_float` or `self.dtype`.
+        - Includes full layout tagging and metadata propagation.
         """
         self.diff.sync_axes_from_tag(image)
         
@@ -240,7 +353,32 @@ class EdgeDetector(OperatorCore):
     @torch.no_grad()
     def _detect_edges_torch(self, image: torch.Tensor, gradient: str = "classic") -> torch.Tensor:
         """
-        Torch variant for gradient-based edges with Otsu/eta threshold.
+        Compute edge map from gradient magnitude using Torch backend.
+
+        Computes the L2 norm of the gradient field, then thresholds it using
+        Otsu or a fixed eta value to generate a binary edge map.
+
+        Parameters
+        ----------
+        image : torch.Tensor
+            Input image or volume as a Torch tensor.
+        gradient : {"classic", "sobel"}, optional
+            Gradient method to use. Default is "classic".
+            - "classic": finite differences (Torch-native)
+            - "sobel": Sobel filter approximation
+
+        Returns
+        -------
+        torch.Tensor
+            Binary or float-valued edge map with the same device and shape as input.
+            Includes updated tags and layout metadata.
+
+        Notes
+        -----
+        - Uses `self.diff` for gradient computation and spacing-aware handling.
+        - Otsu thresholding is computed on the CPU using detached NumPy data.
+        - Output dtype is controlled by `self.as_float` or `self.dtype`.
+        - Layout and axis tags are propagated via tracker.
         """
         self.diff.sync_axes_from_tag(image)
         
@@ -276,17 +414,26 @@ class EdgeDetector(OperatorCore):
     # -------- Axes helper --------    
     def _get_axes(self, arr: ArrayLike) -> List[int]:
         """
-        Determine the spatial axes to apply differential operators on.
+        Determine spatial axes for differential operations (e.g., gradient, divergence).
+
+        Removes non-spatial axes such as channel, batch, and direction from the axis list.
+        Works with both raw and tagged arrays (NumPy or Torch).
 
         Parameters
         ----------
-        arr : np.ndarray | torch.Tensor
-            Input image or tensor.
+        arr : np.ndarray or torch.Tensor
+            Input array representing an image or volume.
 
         Returns
         -------
-        axes : list[int]
-            List of axes eligible for gradient/divergence computation.
+        List[int]
+            List of spatial axis indices eligible for differentiation.
+
+        Notes
+        -----
+        - If input is 2D, returns all axes without filtering.
+        - Converts negative indices to positive using input ndim.
+        - Uses tag metadata if available; otherwise falls back to internal defaults.
         """
         ndim = arr.ndim
         axes = list(range(ndim))
@@ -311,6 +458,30 @@ class EdgeDetector(OperatorCore):
 
     # -------- Sign-change edges (zero-crossings dominance) --------
     def _sign_change_edges(self, u: ArrayLike) -> ArrayLike:
+        """
+        Detect edges based on sign changes in second-order derivatives (zero-crossings).
+
+        Selects the appropriate backend (NumPy or Torch) and whether to apply
+        edge padding based on configuration. The selected function is run via
+        the `ImageProcessor` wrapper.
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input image or volume (NumPy or Torch array), raw or tracked.
+
+        Returns
+        -------
+        ArrayLike
+            Binary edge map indicating sign changes in second derivatives.
+            Tagging and layout are preserved.
+
+        Notes
+        -----
+        - Dispatches to `_numpy_sign_change[_padded]` or `_torch_sign_change[_padded]`.
+        - Padding is controlled by `self.use_padding`.
+        - Uses `self.processor.function` to wrap and apply the selected operation.
+        """
         if self.framework == "torch": 
             func = self._torch_sign_change_padded if self.use_padding else self._torch_sign_change 
         else: 
@@ -322,6 +493,30 @@ class EdgeDetector(OperatorCore):
         return result
 
     def _numpy_sign_change(self, u: np.ndarray) -> np.ndarray:
+        """
+        Detect edge locations by identifying sign changes in a NumPy array.
+
+        Compares adjacent elements along each spatial axis to detect zero-crossings
+        (sign changes) and marks the dominant pixel between each pair.
+
+        Parameters
+        ----------
+        u : np.ndarray
+            Input scalar field (typically second derivative or Laplacian).
+
+        Returns
+        -------
+        np.ndarray
+            Binary map (float32) indicating where sign changes occur.
+            Includes updated tags and layout metadata.
+
+        Notes
+        -----
+        - A sign change is detected when a * b <= 0 between adjacent pixels.
+        - The dominant location is chosen based on absolute value comparison.
+        - Resulting edge map is float32 and layout-tagged.
+        - Only spatial axes (excluding batch/channel) are considered.
+        """
         tagger = self.track(u)
         ndim = u.ndim
         shape = u.shape
@@ -356,6 +551,30 @@ class EdgeDetector(OperatorCore):
         return tracker.get()
     
     def _numpy_sign_change_padded(self, u: np.ndarray) -> np.ndarray:
+        """
+        Detect sign changes (zero-crossings) with axis-aware padding (NumPy backend).
+
+        Identifies adjacent pixels with opposite signs and marks the dominant one,
+        while preserving image shape by padding the output in each direction.
+
+        Parameters
+        ----------
+        u : np.ndarray
+            Input scalar field (e.g., Laplacian or second derivative array).
+
+        Returns
+        -------
+        np.ndarray
+            Float32 binary edge map where sign changes are detected.
+            Output shape matches input. Tagging and layout metadata are preserved.
+
+        Notes
+        -----
+        - A sign change is detected where a * b <= 0 between adjacent pixels.
+        - Padding is applied to shift masks back into original shape.
+        - Absolute value comparison determines dominant pixel per pair.
+        - Padding is performed per axis using `np.pad`, shaped for each ND dimension.
+        """
         tagger = self.track(u)
         ndim = u.ndim
         shape = u.shape
@@ -392,6 +611,30 @@ class EdgeDetector(OperatorCore):
 
     @torch.no_grad()
     def _torch_sign_change_padded(self, u: torch.Tensor) -> torch.Tensor:
+        """
+        Detect sign changes (zero-crossings) with axis-aware padding (Torch backend).
+
+        Identifies adjacent pixels with opposite signs and marks the dominant one
+        based on absolute value, using directional padding to preserve input shape.
+
+        Parameters
+        ----------
+        u : torch.Tensor
+            Input scalar field (e.g., Laplacian or second derivative tensor).
+
+        Returns
+        -------
+        torch.Tensor
+            Float32 edge map indicating sign changes.
+            Same shape as input with updated layout tags.
+
+        Notes
+        -----
+        - Sign change is detected where a * b <= 0 between adjacent values.
+        - Dominance is determined by comparing absolute values.
+        - Directional padding is applied per axis using `F.pad`.
+        - Result includes tag propagation and status="sign_change".
+        """
         tagger = self.track(u)
         ndim = u.ndim
         bool_map = torch.zeros_like(u, dtype=torch.bool)
@@ -427,6 +670,30 @@ class EdgeDetector(OperatorCore):
  
     @torch.no_grad()
     def _torch_sign_change(self, u: torch.Tensor) -> torch.Tensor:
+        """
+        Detect sign changes (zero-crossings) in a Torch tensor without padding.
+
+        Scans along each spatial axis to find adjacent pixels with opposite signs,
+        selects the dominant location based on absolute value, and marks edges.
+
+        Parameters
+        ----------
+        u : torch.Tensor
+            Input scalar field (e.g., Laplacian or second derivative tensor).
+
+        Returns
+        -------
+        torch.Tensor
+            Float32 edge map indicating sign changes. Same shape as input.
+            Includes updated layout and status="sign_change".
+
+        Notes
+        -----
+        - Sign changes are detected where a * b <= 0 between neighbors.
+        - Dominant position is chosen via absolute value comparison.
+        - Output preserves input shape (no padding).
+        - Includes tag propagation and ND axis-aware logic.
+        """
         tagger = self.track(u)
         ndim = u.ndim
         shape = u.shape 
@@ -461,6 +728,29 @@ class EdgeDetector(OperatorCore):
  
     # -------- Laplacian zero-crossing --------
     def _laplacian_edge(self, u: ArrayLike) -> ArrayLike:
+        """
+        Detect edges via zero-crossings of the Laplacian (second derivative).
+
+        Applies the Laplacian operator to each channel or image slice, then detects
+        sign changes to identify edge locations.
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input image or volume (NumPy or Torch array), tracked or raw.
+
+        Returns
+        -------
+        ArrayLike
+            Binary or float-valued edge map with the same shape and backend as input.
+            Output dtype follows `self.dtype` and `self.as_float` settings.
+
+        Notes
+        -----
+        - Uses `self.diff.laplacian()` followed by `_sign_change_edges()`.
+        - Handles channel-wise inputs using `ImageProcessor`.
+        - Result is layout-aware and tagged.
+        """
         def lap_edge_channel(channel: ArrayLike) -> ArrayLike:
             self.diff.sync_axes_from_tag(channel)
             lap = self.diff.laplacian(channel)
@@ -478,6 +768,35 @@ class EdgeDetector(OperatorCore):
 
     # -------- Combined edges --------
     def _combined_edge(self, u: ArrayLike) -> ArrayLike:
+        """
+        Detect edges by combining gradient- and Laplacian-based edge maps.
+
+        Computes both edge maps and fuses them using a configurable logic:
+        - Logical AND
+        - Logical OR
+        - Weighted fusion + thresholding
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input image or volume (NumPy or Torch array), raw or tracked.
+
+        Returns
+        -------
+        ArrayLike
+            Binary or float-valued edge map. Layout and backend are preserved.
+            Output dtype is controlled by `self.dtype` and `self.as_float`.
+
+        Notes
+        -----
+        - Uses `_gradient_edges()` and `_laplacian_edge()` internally.
+        - Fusion strategy is controlled by `self.mode`:
+            * "and": intersection of both edge maps
+            * "or": union of both edge maps
+            * "weighted": convex combination using `self.alpha`, then thresholded
+        - Thresholding supports Otsu ("auto") or fixed value.
+        - Operates channel-wise via `ImageProcessor`.
+        """
         def fused_edge_channel(channel: ArrayLike) -> ArrayLike:
             # --- Get gradient mask (framework-aware) ---
             lap = self._laplacian_edge(channel)
@@ -513,6 +832,30 @@ class EdgeDetector(OperatorCore):
             
     # -------- Marr-Hildreth --------
     def _marr_hildreth(self, u: ArrayLike) -> ArrayLike:
+        """
+        Detect edges using the Marr-Hildreth method (Laplacian of Gaussian).
+
+        Combines zero-crossings from the Laplacian with high gradient responses
+        to highlight perceptually relevant contours.
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input image or volume (NumPy or Torch array), raw or tracked.
+
+        Returns
+        -------
+        ArrayLike
+            Binary edge map indicating strong structural boundaries.
+            Output type and layout are preserved and tagged.
+
+        Notes
+        -----
+        - Computes `_laplacian_edge()` and `_gradient_edges()` on each channel.
+        - Final edge map is the logical AND of both maps (after binarization).
+        - Uses `ImageProcessor` for per-channel operation.
+        - Output dtype is controlled by `self.dtype` and `self.as_float`.
+        """
         def channel_marr_hildreth(channel: ArrayLike) -> ArrayLike:
             lap = self._laplacian_edge(channel)
             grad = self._gradient_edges(channel)
@@ -537,9 +880,40 @@ class EdgeDetector(OperatorCore):
     @torch.no_grad()
     def _canny_edges(self, u: ArrayLike) -> ArrayLike:
         """
-        Canny edge detection (2D/3D). Uses Gaussian smoothing, gradient magnitude,
-        NMS (complete or simple), double threshold, and hysteresis.
+        Detect edges using the Canny method (extended to 2D/3D, NumPy or Torch).
+
+        Applies Gaussian smoothing, gradient computation, non-maximum suppression,
+        double thresholding, and hysteresis to produce a clean edge map.
+
+        Parameters
+        ----------
+        u : ArrayLike
+            Input image or volume (NumPy or Torch), raw or tracked.
+
+        Returns
+        -------
+        ArrayLike
+            Final binary edge map after Canny processing.
+            Includes updated tags with status="canny" and shape tracking.
+
+        Notes
+        -----
+        **Steps:**
+        1. Gaussian smoothing (via `self.convolve`)
+        2. Gradient magnitude and orientation (`self.diff.gradient`)
+        3. Non-maximum suppression:
+        - Full ND version if `self.complete_nms=True`
+        - Simple per-axis suppression otherwise
+        4. Double thresholding:
+        - Otsu thresholding if `self.eta="otsu"` or None
+        - Manual thresholding otherwise
+        5. Hysteresis:
+        - Uses max pooling (Torch) or `maximum_filter` (NumPy) to connect weak to strong edges
+
+        - Supports 2D and 3D inputs
+        - Output type is float32; layout and tags are preserved
         """
+
         tagger=self.track(u)
         framework = self.framework
         eps = 1e-8
@@ -637,9 +1011,40 @@ class EdgeDetector(OperatorCore):
         original: Optional[ArrayLike] = None,
     ) -> ArrayLike:
         """
-        Perform non-maximum suppression using gradient orientation.
-        Supports 2D/3D images, with channel axis handling.
+        Perform non-maximum suppression (NMS) based on gradient orientation.
 
+        Suppresses non-maxima in the direction of the gradient to refine edge localization.
+        Supports 2D and 3D images, with optional per-channel processing if a channel axis
+        is present in the original tagged image.
+
+        Parameters
+        ----------
+        magnitude : ArrayLike
+            Gradient magnitude array (NumPy or Torch), shape [...], without direction axis.
+        orientation : ArrayLike
+            Gradient orientation array (same shape as magnitude).
+        original : ArrayLike or None, optional
+            Original input image, used for tag extraction (e.g., channel axis).
+
+        Returns
+        -------
+        ArrayLike
+            Gradient magnitude array with non-maximum values suppressed.
+
+        Notes
+        -----
+        - For 2D:
+            * Orientation is interpreted in degrees [0°, 180°).
+            * Suppression directions: horizontal, vertical, and two diagonals.
+            * Values are compared with shifted neighbors and suppressed if not a local maximum.
+
+        - For 3D:
+            * Calls `process_slice_3d_patchwise()` for ND-aware suppression.
+            * Currently supports simple patchwise suppression strategy.
+
+        - Supports:
+            * Torch and NumPy backends
+            * Tagged arrays with or without channel axis
         """
         framework = "torch" if torch.is_tensor(magnitude) else "numpy"
 
@@ -832,10 +1237,52 @@ def edge_detect(
     conv_strategy: Optional[str] = None,
     edge_strategy: str = "gradient",
 ) -> ArrayLike:
-
     """
-    Convenience wrapper to instantiate and run EdgeDetector with minimal params.
-    """    
+    High-level wrapper for edge detection using the EdgeDetector module.
+
+    Instantiates and runs an EdgeDetector with default or user-defined strategies
+    for differentiation, convolution, processing, and edge detection.
+
+    Parameters
+    ----------
+    img : ArrayLike
+        Input image or volume (NumPy or Torch).
+    framework : {"numpy", "torch"}, optional
+        Framework used for computation. Default is "numpy".
+    output_format : {"numpy", "torch"}, optional
+        Format of the returned result. Default is "numpy".
+    layout_name : str, optional
+        Axis layout of the input image (e.g., "HWC", "ZYX"). Default is "HWC".
+    layout_framework : {"numpy", "torch"}, optional
+        Framework used to interpret the layout. Default is "numpy".
+    diff_strategy : str or None, optional
+        Differentiation strategy ("vectorized", "classic", "torch", etc.). Default auto-selected from framework.
+    processor_strategy : str or None, optional
+        Strategy for image preprocessing ("vectorized", "parallel", etc.). Default auto-selected.
+    conv_strategy : str or None, optional
+        Convolution backend ("fft", "spatial", "torch"). Default auto-selected.
+    edge_strategy : str, optional
+        Edge detection method. Options include:
+            - "gradient"
+            - "sobel_gradient"
+            - "sign_change"
+            - "laplacian"
+            - "combined"
+            - "marr_hildreth"
+            - "canny"
+        Default is "gradient".
+
+    Returns
+    -------
+    ArrayLike
+        Binary or float-valued edge map with the same backend as `output_format`.
+        Includes propagated tags and layout metadata.
+
+    Notes
+    -----
+    - Automatically configures all required submodules from default or inferred parameters.
+    - Supports ND images and layout-aware tagging throughout the pipeline.
+    """
 
     # ====[ Fallback ]====
     edge_strategy=edge_strategy or "gradient"

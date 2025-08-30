@@ -29,19 +29,26 @@ class TransformManager(OperatorCore):
     Notes
     -----
     - Inputs: NumPy, Torch, or PIL.Image.
-    - Internally, we convert to NumPy (channel-last, uint8) for PIL compatibility.
-    - Outputs are converted back to the requested backend and tagged.
+    - Internally, images are converted to NumPy (channel-last, uint8) for PIL compatibility.
+    - Outputs are converted back to the configured backend (`GlobalConfig`) and tagged.
+    - Axis layout is preserved and tracked using `LayoutConfig`.
     """
 
     # ====[ INITIALIZATION – TransformManager ]====
     def __init__(
         self,
-        *,
         layout_cfg: LayoutConfig = LayoutConfig(),
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
         """
-        Initialize TransformManager with full axis management and configuration.
+        Initialize the TransformManager with layout and backend configuration.
+
+        Parameters
+        ----------
+        layout_cfg : LayoutConfig
+            Layout configuration used to track and convert image axis order (e.g., HWC ↔ CHW).
+        global_cfg : GlobalConfig
+            Global behavior configuration: backend, output format, device, normalization, etc.
         """
         self.layout_cfg: LayoutConfig = layout_cfg
         self.global_cfg: GlobalConfig = global_cfg
@@ -78,7 +85,6 @@ class TransformManager(OperatorCore):
         self,
         image: ArrayLike,
         transform: Callable,
-        *,
         return_format: str = "torch",
         tag_as: str = "output",
         enable_uid: bool = False,
@@ -87,31 +93,50 @@ class TransformManager(OperatorCore):
         return_tracker: bool = False,
     ) -> Union[ArrayLike, Tuple[ArrayLike, Any]]:
         """
-        Apply torchvision-style transforms to an image using a safe PIL bridge.
+        Apply a torchvision-style transform pipeline to an image using a PIL-safe bridge.
+
+        Handles layout normalization, dtype conversion (→ uint8), axis tracking,
+        and returns the transformed result in the desired backend.
 
         Parameters
         ----------
-        image : np.ndarray | torch.Tensor | PIL.Image
-            Input image in NumPy, Torch, or PIL format.
-        transform : torchvision.transforms.Compose | callable
-            Transform pipeline to apply.
-        return_format : {'torch','numpy'}
-            Desired output backend.
-        tag_as : str
-            Status tag for the final output.
-        enable_uid : bool
-            Whether to attach a UID.
-        op_params : dict | None
-            Metadata to store in the tag.
-        allow_pil_input : bool
-            Accept PIL input directly (no initial conversion).
-        return_tracker : bool
-            If True, return the AxisTracker instead of raw data.
+        image : ndarray | torch.Tensor | PIL.Image
+            Input image to transform.
+        transform : callable
+            A `torchvision.transforms.Compose` or compatible callable transform.
+        return_format : {'torch', 'numpy'}, default 'torch'
+            Framework of the returned image.
+        tag_as : str, default 'output'
+            Status tag for the transformed result.
+        enable_uid : bool, default False
+            Whether to assign a unique ID tag to the output.
+        op_params : dict or None, optional
+            Metadata to attach in the tag (e.g., {'transform': 'resize+flip'}).
+        allow_pil_input : bool, default True
+            If True, accepts direct `PIL.Image` as input without conversion.
+        return_tracker : bool, default False
+            If True, also returns the corresponding `AxisTracker` object.
 
         Returns
         -------
-        ndarray | Tensor | AxisTracker
-            Transformed data in the chosen backend (or the tracker).
+        result : ndarray or torch.Tensor
+            Transformed image in the requested backend.
+        tracker : AxisTracker, optional
+            Only returned if `return_tracker=True`.
+
+        Raises
+        ------
+        TypeError
+            If input or output type is unsupported.
+            If transform is not callable.
+
+        Notes
+        -----
+        - The input is internally converted to NumPy (HWC, uint8) for PIL compatibility.
+        - If the transform returns a Torch tensor, it is post-processed to match layout.
+        - Singleton grayscale channels (H, W, 1) are squeezed to (H, W).
+        - Axis tagging is maintained and restored after transformation.
+        - This method ensures safe round-trip from any layout/backend to transformed output.
         """
         if not callable(transform):
             raise TypeError("Transform must be callable (e.g., transforms.Compose).")

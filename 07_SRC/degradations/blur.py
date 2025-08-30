@@ -17,12 +17,38 @@ ArrayLike = Union[np.ndarray, torch.Tensor]
 Framework = Literal["numpy", "torch"]
 
 def _ensure_odd(k: int) -> int:
-    """Return k if odd, else k+1."""
+    """
+    Ensure that an integer is odd.
+
+    Parameters
+    ----------
+    k : int
+        Input integer.
+
+    Returns
+    -------
+    int
+        The same value if k is already odd; otherwise, k + 1.
+    """
     return k if (k % 2 == 1) else (k + 1)
 
 
 def _as_sequence(x: Union[int, float, Sequence[Union[int, float]]], ndim: int) -> Tuple[float, ...]:
-    """Broadcast a scalar or sequence to length `ndim` as floats."""
+    """
+    Broadcast a scalar or sequence to a float-valued sequence of length `ndim`.
+
+    Parameters
+    ----------
+    x : int, float, or sequence of numbers
+        Scalar or list/tuple to broadcast.
+    ndim : int
+        Target length of the output sequence.
+
+    Returns
+    -------
+    Tuple[float, ...]
+        Tuple of floats with length equal to `ndim`.
+    """
     if isinstance(x, (int, float)):
         return tuple(float(x) for _ in range(ndim))
     if isinstance(x, Sequence):

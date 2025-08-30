@@ -22,10 +22,12 @@ They are **dual-backend (NumPy / PyTorch)** and support **ND inputs** when relev
 
 - `artifact_cleaning.py`  
   ND-compatible artifact cleaner for structured artifacts (e.g., horizontal stripes).  
-  - Based on feature extraction (Sobel gradients, edge maps, median filter).  
-  - Detects stripe bands and inpaints them by vertical interpolation.  
+  - Based on feature extraction (Sobel gradients, edge maps, median filtering).  
+  - Detects stripe bands and removes them by vertical interpolation.  
   - Works on 2D slices or 3D volumes (`layout_name="DHW"`).  
-  - Uses `ImageProcessor` for slice-by-slice cleaning.
+  - Uses `ImageProcessor` for slice-by-slice cleaning.  
+  - **Note**: Designed specifically for LC-OCT images to remove optical window artifacts, not intended for general-purpose use.
+ 
 
 ## Layouts & dimensions
 

@@ -54,6 +54,31 @@ class PeronaMalikDenoiser(OperatorCore):
         layout_cfg: LayoutConfig = LayoutConfig(),
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
+        """
+        Initialize the full configuration set for a processing pipeline.
+
+        Parameters
+        ----------
+        algo_cfg : AlgorithmConfig
+            Settings for high-level algorithms (e.g., Perona–Malik).
+        filter_cfg : FilterConfig
+            Parameters for generic filters (e.g., smoothing, edge-aware).
+        diff_operator_cfg : DiffOperatorConfig
+            Configuration for finite difference gradient/divergence operators.
+        ndconvolver_cfg : NDConvolverConfig
+            Settings for N-dimensional convolution backends (e.g., Gaussian filters).
+        img_process_cfg : ImageProcessorConfig
+            Generic image processing options (conversion, parallel strategy, etc.).
+        layout_cfg : LayoutConfig
+            Layout information (axis order, overrides, naming convention).
+        global_cfg : GlobalConfig
+            Global backend configuration (framework, device, strategies, etc.).
+
+        Returns
+        -------
+        None
+        """
+
 
         # ====[ Configuration ]====
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -156,8 +181,19 @@ class PeronaMalikDenoiser(OperatorCore):
 
     def __call__(self, image: ArrayLike) -> ArrayLike:
         """
-        Run the selected Perona–Malik algorithm on `image` and convert to output format.
+        Run the selected Perona–Malik algorithm on the input image and return the processed result.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image to process. Can be a NumPy array or PyTorch tensor, depending on configuration.
+
+        Returns
+        -------
+        ArrayLike
+            The filtered image, in the configured output format (NumPy or Torch).
         """
+
         img = self.convert_once(image)
         result = self._detect(img)
         return self.to_output(result, tag_as="algorithm")
@@ -166,8 +202,19 @@ class PeronaMalikDenoiser(OperatorCore):
         
     def _detect(self, image: ArrayLike) -> ArrayLike:
         """
-        Dispatch to the requested algorithm variant.
+        Dispatch the input image to the selected algorithm variant for processing.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image to process using the configured algorithm variant.
+
+        Returns
+        -------
+        ArrayLike
+            The result of the selected algorithm applied to the input image.
         """
+
         algorithms = {
             "pm": self._denoise_pm,
             "enhanced": self._denoise_enhanced_pm,
@@ -177,17 +224,40 @@ class PeronaMalikDenoiser(OperatorCore):
         return algorithms[self.algorithm](image)
 
     def _convolve(self, image: ArrayLike) -> ArrayLike:
-        """Apply ND convolution with the precomputed kernel."""
-        return self.convolve(image, self.kernel)
-    
-    def _convolve(self, image):
+        """
+        Apply N-dimensional convolution to the input image using the configured kernel.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or Torch tensor) to be convolved.
+
+        Returns
+        -------
+        ArrayLike
+            Convolved image, in the same format as the input.
+        """
+
         return self.convolve(image, self.kernel)
 
     # ---- classic PM ------------------------------------------------------- 
     def _denoise_pm(self, image: ArrayLike) -> ArrayLike:
         """
-        Classic Perona–Malik diffusion with edge-aware conductivity g(|∇u|).
+        Apply the classic Perona–Malik anisotropic diffusion to denoise the image.
+
+        The method uses edge-aware conductivity based on the image gradient magnitude: g(|∇u|).
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image to denoise (NumPy array or Torch tensor).
+
+        Returns
+        -------
+        ArrayLike
+            Denoised image after iterative Perona–Malik diffusion.
         """
+
         # ====[ Torch version ]====
         def diffuse_torch(channel: torch.Tensor) -> Union[torch.Tensor, list[torch.Tensor]]:
             tagger = self.track(channel)
@@ -232,7 +302,20 @@ class PeronaMalikDenoiser(OperatorCore):
     
     def _denoise_enhanced_pm(self, image: ArrayLike) -> ArrayLike:
         """
-        Enhanced PM: conductivity uses |∇(Gσ * u)| while gradient/divergence applied on u.
+        Apply the enhanced Perona–Malik diffusion using a smoothed conductivity term.
+
+        The conductivity is computed from the gradient magnitude of a pre-smoothed image: |∇(Gσ * u)|,
+        while the diffusion is still applied to the original image u.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image to denoise (NumPy array or Torch tensor).
+
+        Returns
+        -------
+        ArrayLike
+            Denoised image after enhanced Perona–Malik diffusion.
         """
         
         # ====[ Torch version ]====
@@ -298,26 +381,50 @@ def pm(
     disable_tqdm: bool = False,
 ) -> ArrayLike:
     """
-    Convenience wrapper around `PeronaMalikDenoiser` with reasonable defaults.
+    Apply Perona–Malik anisotropic diffusion to an image with configurable options.
+
+    This is a high-level convenience wrapper around `PeronaMalikDenoiser` with
+    pre-initialized configuration objects and reasonable default values.
 
     Parameters
     ----------
-    img
+    img : ArrayLike
         Input image (NumPy array or Torch tensor).
-    alpha, dt, steps, sigma
-        Filter, time step, iteration count, and smoothing scale.
-    algorithm
-        'pm' (classic) or 'enhanced'.
-    framework, output_format
-        Backend and output format ('numpy' | 'torch').
-    layout_name, layout_framework
-        Layout/axes configuration passed to LayoutConfig.
-    processor_strategy, diff_strategy, conv_strategy
-        Low-level strategy hints; fallbacks depend on the chosen framework.
-    disable_tqdm
-        Hide progress bars if True.
+    alpha : float, optional
+        Diffusion scaling parameter (edge sensitivity).
+    dt : float, optional
+        Time step for the diffusion process.
+    steps : int, optional
+        Number of diffusion iterations to perform.
+    sigma : float or Tuple[float, float], optional
+        Smoothing scale used in the enhanced version (e.g., for Gaussian prefiltering).
+    algorithm : {'pm', 'enhanced'}, optional
+        Algorithm variant: 'pm' for classic Perona–Malik, 'enhanced' for smoothed conductivity.
+    filter_mode : str, optional
+        Filtering mode, typically set to 'pm'.
+    framework : {'numpy', 'torch'}, optional
+        Computation backend to use.
+    output_format : {'numpy', 'torch'}, optional
+        Desired format of the returned image.
+    layout_name : str, optional
+        Name of the layout used for input image (e.g., 'HWC', 'NCHW').
+    layout_framework : {'numpy', 'torch'}, optional
+        Framework for resolving layout strings.
+    processor_strategy : str, optional
+        Processing strategy (e.g., 'classic', 'vectorized', 'parallel').
+    diff_strategy : str, optional
+        Gradient computation strategy (e.g., 'forward', 'centered').
+    conv_strategy : str, optional
+        Convolution backend strategy (e.g., 'convolve2d', 'fft').
+    disable_tqdm : bool, optional
+        If True, disables the progress bar.
+
+    Returns
+    -------
+    ArrayLike
+        Denoised image after Perona–Malik diffusion, in the specified output format.
     """
-    
+
     # ====[ Fallback ]====
     diff_strategy=diff_strategy or "vectorized" if framework == "numpy" else "torch"
     conv_strategy=conv_strategy or "fft" if framework == "numpy" else "torch"

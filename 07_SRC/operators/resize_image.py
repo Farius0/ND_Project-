@@ -26,14 +26,20 @@ Framework = Literal["numpy", "torch"]
 # ==================================================
 class ResizeOperator(OperatorCore):
     """
-    ND resize for NumPy/Torch with tag propagation. Supports batch-wise and
-    slice-wise execution via ImageProcessor.
+    ND resizing operator with layout-aware and backend-specific logic.
+
+    Supports flexible resizing of 2D, 3D, or batched ND images using NumPy or Torch,
+    while preserving layout metadata and UID tagging via OperatorCore.
 
     Notes
     -----
-    - Torch path forces input to (N, C, [D,] H, W), calls F.interpolate, then restores axes.
-    - NumPy path uses skimage.resize for ND (with channel_axis) and OpenCV for fast 2D.
-    - If `match_to` is provided, spatial size is inferred from its spatial axes.
+    - Torch backend:
+        * Input is normalized to (N, C, [D,] H, W), resized with `F.interpolate`, then restored.
+    - NumPy backend:
+        * Uses `skimage.transform.resize` for ND resizing (layout-aware),
+          or OpenCV for fast 2D resizing when applicable.
+    - If `match_to` is provided, the target spatial size is inferred from its layout-aware shape.
+    - Handles both singleton and batched images (e.g., with or without batch/channel dimensions).
     """
 
     # ====[ INIT ]====
@@ -44,6 +50,21 @@ class ResizeOperator(OperatorCore):
         layout_cfg: LayoutConfig = LayoutConfig(),
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
+        """
+        Initialize the ResizeOperator with full axis tracking and backend configuration.
+
+        Parameters
+        ----------
+        resize_cfg : ResizeConfig
+            Resizing strategy, interpolation mode, anti-aliasing, and layout options.
+        img_process_cfg : ImageProcessorConfig
+            Processing options (strategy, return type, parallelism).
+        layout_cfg : LayoutConfig
+            Axis layout description and overrides.
+        global_cfg : GlobalConfig
+            Global execution behavior: backend, format, device, etc.
+        """
+
         """Initialize with full axis control and processor configuration."""
         # --- Configs ---
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -95,18 +116,44 @@ class ResizeOperator(OperatorCore):
     # ====[ BUILD PROCESSOR – Robust ND ResizeProcessor ]====
     def _build_processor(self, spatial_shape: Optional[Sequence[int]]) -> ImageProcessor:
         """
-        Build ImageProcessor for resizing with robust axis management.
+        Build and configure an ImageProcessor for ND image resizing.
+
+        Automatically adapts the resizing function based on the current framework
+        (Torch or NumPy), and ensures layout-awareness through axis tracking.
 
         Parameters
         ----------
-        spatial_shape : tuple[int] | None
-            Desired spatial output shape (H, W) or (D, H, W). If None, will be
-            provided later via match_to.
+        spatial_shape : tuple of int or None
+            Desired spatial output shape (e.g., (H, W) or (D, H, W)).
+            If None, the shape must be inferred later via `match_to`.
 
         Returns
         -------
         processor : ImageProcessor
-            Configured processor object for resizing.
+            A layout-aware, backend-compatible processor ready to resize inputs.
+
+        Notes
+        -----
+        - Torch backend:
+            * Forces input format to (N, C, [D,] H, W).
+            * Uses `F.interpolate` with mode "bilinear" or "trilinear".
+            * Automatically restores original batch/channel axes.
+        
+        - NumPy backend:
+            * Uses `cv2.resize` for 2D images.
+            * Uses `skimage.transform.resize` for ND images.
+            * Handles channel/batch axes explicitly for consistent results.
+        
+        - In both cases:
+            * Singleton batch or channel axes are inserted and restored if missing.
+            * The processor is built using current `LayoutConfig`, `GlobalConfig`,
+            and `ImageProcessorConfig`.
+            * Tags are updated with `status='resized'` and `shape_after`.
+
+        Raises
+        ------
+        ValueError
+            If the current framework is not supported.
         """
         if self.framework == "torch":
             @torch.no_grad()
@@ -275,17 +322,31 @@ class ResizeOperator(OperatorCore):
     
     def _get_axes(self, arr: ArrayLike) -> List[int]:
         """
-        Determine the spatial axes to apply differential operators on.
+        Determine the spatial axes for applying differential operators (e.g., gradients, divergence).
+
+        Excludes non-spatial axes such as batch, channel, or direction axes,
+        based on the image tag or internal axis configuration.
 
         Parameters
         ----------
-        arr : np.ndarray | torch.Tensor
-            Input image or tensor.
+        arr : np.ndarray or torch.Tensor
+            Input image or volume, potentially tagged with layout metadata.
 
         Returns
         -------
-        axes : list[int]
-            List of axes eligible for gradient/divergence computation.
+        axes : list of int
+            List of axis indices corresponding to spatial dimensions.
+
+        Notes
+        -----
+        - For 2D inputs, returns all axes (i.e., [0, 1]) as fallback.
+        - For higher-dimensional inputs, uses the image tag (if available) or
+        `self.axes` to exclude:
+            * 'channel_axis'
+            * 'batch_axis'
+            * 'direction_axis'
+        - Supports negative axis indices via automatic normalization to positive values.
+        - Preserves axis order as in the original data.
         """
         ndim = arr.ndim
         axes = list(range(ndim))
@@ -311,18 +372,36 @@ class ResizeOperator(OperatorCore):
     # ====[ CALL METHOD – ND Resize Operation ]====
     def __call__(self, image: ArrayLike, match_to: Optional[ArrayLike] = None) -> ArrayLike:
         """
-        Resize to `self.size` or to the spatial shape of `match_to`.
+        Resize the input image to a fixed spatial size or match a reference image.
+
+        If `match_to` is provided, the spatial shape is inferred from its layout-aware
+        axes and overrides `self.size`.
 
         Parameters
         ----------
-        image : np.ndarray | torch.Tensor
-            Input image.
-        match_to : np.ndarray | torch.Tensor | None
-            Reference whose spatial geometry to match.
+        image : np.ndarray or torch.Tensor
+            Input image or volume to resize.
+        match_to : np.ndarray or torch.Tensor or None, optional
+            Reference input from which to extract the spatial dimensions.
+            Must have at least 2 spatial axes (e.g., H, W).
 
         Returns
         -------
-        np.ndarray | torch.Tensor
+        np.ndarray or torch.Tensor
+            Resized image in the current framework (`self.framework`),
+            preserving layout and dtype compatibility.
+
+        Raises
+        ------
+        ValueError
+            If `match_to` is provided but has fewer than 2 spatial dimensions.
+
+        Notes
+        -----
+        - The resizing behavior is delegated to a dynamically built `ImageProcessor`.
+        - If `match_to` is None, uses the fixed size configured in `self.resize_cfg`.
+        - Axis layout is respected through `LayoutConfig`, including batch and channel reordering.
+        - Output tags and trace metadata can optionally be propagated (commented section).
         """
         # ====[ Step 1: Determine processor according to match_to ]====
         if match_to is not None:

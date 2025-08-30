@@ -13,6 +13,7 @@ pandas==2.2.3
 pillow==10.4.0
 pip==25.1.1
 pydicom==3.0.1
+pytest==8.4.1
 pytorch_msssim==1.0.0
 pyvista==0.44.1
 PyYAML==6.0.2

@@ -70,7 +70,31 @@ class FeatureExtractorND(OperatorCore):
         layout_cfg: LayoutConfig = LayoutConfig(),
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
-        
+        """
+        Initialize an N-Dimensional feature extractor with full operator configuration.
+
+        Parameters
+        ----------
+        feature_cfg : FeatureConfig
+            Feature extraction settings (GLCM, Gabor, wavelet, ridge, etc.).
+        edge_detector_cfg : EdgeDetectorConfig
+            Configuration for edge detectors used in some feature modes.
+        diff_operator_cfg : DiffOperatorConfig
+            Configuration for gradient-based operations (e.g., for ridge or flow).
+        ndconvolver_cfg : NDConvolverConfig
+            Convolution parameters for Gaussian or oriented filters.
+        img_process_cfg : ImageProcessorConfig
+            General image processing options and backend control.
+        layout_cfg : LayoutConfig
+            Layout specification (axis ordering, overrides).
+        global_cfg : GlobalConfig
+            Global framework and processing policy configuration.
+
+        Returns
+        -------
+        None
+        """
+
         # --- Config mirrors ---
         self.layout_cfg: LayoutConfig = layout_cfg
         self.global_cfg: GlobalConfig = global_cfg
@@ -193,9 +217,29 @@ class FeatureExtractorND(OperatorCore):
             layout_cfg=self.layout_cfg,
             global_cfg=self.global_cfg,
         )
-
         
     def __call__(self, image: ArrayLike) -> Union[ArrayLike, List[ArrayLike], Tuple[Any, Any]]:
+        """
+        Apply the configured feature extraction pipeline to an input image.
+
+        Supports sequential and combined features, multiple parameter blocks, and flexible
+        output modes (stacked, separate, or with feature name return).
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor) to extract features from.
+
+        Returns
+        -------
+        ArrayLike | List[ArrayLike] | Tuple
+            - If stack=True:
+                → single array with features stacked along a new axis ("F").
+            - If stack=False and return_feat_names=False:
+                → list of feature arrays.
+            - If return_feat_names=True:
+                → tuple (features, names) where features can be stacked or separate.
+        """
         image = self.convert_once(image, tag_as="input")
         features_blocks: Dict[str, Any] = {}
         fmap: List[ArrayLike] = []
@@ -312,13 +356,25 @@ class FeatureExtractorND(OperatorCore):
     @staticmethod
     def _normalize_feature_spec(features: Any) -> Dict[str, Any]:
         """
-        Normalize the user-defined feature structure to a consistent internal format.
+        Normalize user-defined feature specifications to a unified internal structure.
 
-        Supported input formats:
-        - list of str
-        - list of list (combined)
-        - dict 
+        Parameters
+        ----------
+        features : str | list | dict
+            Feature specification provided by the user. Supported formats:
+            - str : single feature name
+            - list : list of feature names, or nested lists for combined features
+            - dict : with optional keys "seq", "comb", and "param"
+
+        Returns
+        -------
+        dict
+            Standardized dictionary with the following keys:
+            - "seq" : list of independent features
+            - "comb" : list of chained features (combined mode)
+            - "param" : parameter grid for feature variations
         """
+
         out: Dict[str, Any] = {"seq": [], "comb": [], "param": {}}
 
         if isinstance(features, dict):
@@ -345,12 +401,46 @@ class FeatureExtractorND(OperatorCore):
 
 
     def _normalize_feature_axis(self, data: Any) -> Any:
+        """
+        Recursively normalize feature axis containers.
+
+        Parameters
+        ----------
+        data : Any
+            Feature data, possibly a nested list of arrays.
+
+        Returns
+        -------
+        Any
+            Flattened or normalized version of the data, with recursive application
+            if input is a list. Otherwise, returns data unchanged.
+        """
         if isinstance(data, list):
             return [self._normalize_feature_axis(d) for d in data]
         return data
 
     # ------------------ Feature dispatch ------------------ #
     def _extract(self, image: ArrayLike, feat: str) -> Any:
+        """
+        Extract a specific feature from the input image.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        feat : str
+            Feature name to extract. Must match one of the supported keys.
+
+        Returns
+        -------
+        Any
+            Feature output, format depends on the method used.
+
+        Raises
+        ------
+        ValueError
+            If the requested feature name is not supported.
+        """
         base_kw = dict(
             window_size=self.window_size,
             framework=self.framework,
@@ -404,18 +494,68 @@ class FeatureExtractorND(OperatorCore):
         return mapping[feat](image)
 
     def _handle_histogram(self, h: ArrayLike) -> ArrayLike:
+        """
+        Normalize histogram layout for consistency across backends.
+
+        Parameters
+        ----------
+        h : ArrayLike
+            Histogram array, possibly with feature bins along the last axis.
+
+        Returns
+        -------
+        ArrayLike
+            Histogram with bins moved to the first axis (if NumPy); unchanged if Torch.
+        """
+
         if isinstance(h, torch.Tensor):
             return h
         return np.moveaxis(h, -1, 0)
     
     # def _handle_gabor(self, g: ArrayLike) -> ArrayLike:
+    #     """
+    #     Normalize Gabor feature layout across backends.
+
+    #     Parameters
+    #     ----------
+    #     g : ArrayLike
+    #         Gabor response array, typically with frequency bands on the last axis.
+
+    #     Returns
+    #     -------
+    #     ArrayLike
+    #         Gabor responses with bands moved to the first axis (if NumPy); unchanged if Torch.
+    #     """
+    #     if isinstance(g, torch.Tensor):
+    #         return g
+    #     return np.moveaxis(g, -1, 0)
+
     #     if isinstance(g, torch.Tensor):
     #         return g
     #     return np.moveaxis(g, -1, 0)
     
     def edge_detect(self, image: ArrayLike, key: str) -> Any:
         """
-        Compute edges using the EdgeDetector class.
+        Apply edge detection to the input image using a specified method.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        key : str
+            Name of the edge detection method to apply. Must be one of:
+            {'gradient', 'sobel_gradient', 'laplacian', 'marr_hildreth',
+            'sign_change', 'combined', 'canny'}.
+
+        Returns
+        -------
+        Any
+            Output of the edge detector, format depends on the configuration.
+
+        Raises
+        ------
+        ValueError
+            If an unknown method key is provided.
         """
         valid_methods = {"gradient", "sobel_gradient", "laplacian", "marr_hildreth", "sign_change", "combined", "canny"}
 
@@ -427,9 +567,29 @@ class FeatureExtractorND(OperatorCore):
         return self.edge(image)
     
     def diff_operator(self, image: ArrayLike, key: str, output_format: str | None = None) -> Any:
-        """ 
-        Compute the gradient, divergence, or laplacian of an image.
-        
+        """
+        Apply a differential operator (gradient, divergence, laplacian, etc.) to an image.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        key : str
+            Name of the operator to apply. Must be one of:
+            {'gradient', 'divergence', 'laplacian', 'sobel', 'sobel_gradient',
+            'sobel_hessian', 'scharr', 'hessian'}.
+        output_format : str or None, optional
+            Override the output format (e.g., "torch", "numpy"). If None, use default.
+
+        Returns
+        -------
+        Any
+            Output of the selected operator. Type depends on configuration.
+
+        Raises
+        ------
+        ValueError
+            If an unknown operator name is given.
         """
         self.diff.output_format = self.output_format if output_format is None else output_format
         
@@ -600,13 +760,35 @@ class FeatureExtractorND(OperatorCore):
 
     def intensity(self, image: ArrayLike) -> ArrayLike:
         """
-        Compute intensity of an image (Torch or NumPy).
+        Return the raw intensity of the input image.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+
+        Returns
+        -------
+        ArrayLike
+            Same image, possibly converted to the configured output format.
         """
         return self.to_output(image)
 
     def local_mean(self, image: ArrayLike, output_format: Literal["numpy", "torch"] | None = None) -> ArrayLike:
         """
-        Compute local mean over spatial dimensions only.
+        Compute the local mean of an image over spatial dimensions only.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        output_format : {'numpy', 'torch'}, optional
+            Desired output format. If None, uses the default configuration.
+
+        Returns
+        -------
+        ArrayLike
+            Smoothed image with local mean filtering applied, in the requested format.
         """
         out = output_format or self.output_format
         
@@ -624,9 +806,28 @@ class FeatureExtractorND(OperatorCore):
 
         return self.to_output(result, framework=out)
 
-    def local_std(self, image: ArrayLike, framework: Literal["numpy", "torch"] | None = None, output_format: Literal["numpy", "torch"] | None = None) -> ArrayLike:
+    def local_std(
+        self,
+        image: ArrayLike,
+        framework: Literal["numpy", "torch"] | None = None,
+        output_format: Literal["numpy", "torch"] | None = None
+    ) -> ArrayLike:
         """
-        Compute local standard deviation over spatial dimensions only.
+        Compute the local standard deviation over spatial dimensions only.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        framework : {'numpy', 'torch'}, optional
+            Backend to use for internal computations.
+        output_format : {'numpy', 'torch'}, optional
+            Desired output format for the result.
+
+        Returns
+        -------
+        ArrayLike
+            Smoothed image of local standard deviations in the selected format.
         """
         fw = framework or self.framework
         out = output_format or self.output_format
@@ -639,8 +840,22 @@ class FeatureExtractorND(OperatorCore):
 
     def local_median(self, image: ArrayLike, output_format: Literal["numpy", "torch"] | None = None) -> ArrayLike:
         """
-        Compute local median over a sliding window (Torch or NumPy).
-        Handles batch/channel axis properly.
+        Compute the local median over a sliding window, across spatial dimensions only.
+
+        Applies a robust median filter using a NumPy fallback when necessary,
+        and handles batch/channel dimensions appropriately.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        output_format : {'numpy', 'torch'}, optional
+            Desired output format for the result. If None, uses the configured default.
+
+        Returns
+        -------
+        ArrayLike
+            Filtered image with local medians in the selected format.
         """
         is_torch = isinstance(image, torch.Tensor)
         
@@ -669,7 +884,19 @@ class FeatureExtractorND(OperatorCore):
     
     def gaussian(self, image: ArrayLike, output_format: Literal["numpy", "torch"] | None = None) -> ArrayLike:
         """
-        Compute gaussian filter over a sliding window (Torch or NumPy).
+        Apply a Gaussian filter over spatial dimensions using a predefined kernel.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        output_format : {'numpy', 'torch'}, optional
+            Desired output format. If None, uses the configured default.
+
+        Returns
+        -------
+        ArrayLike
+            Smoothed image after Gaussian filtering, in the selected format.
         """
         out = output_format or self.output_format
         
@@ -681,15 +908,52 @@ class FeatureExtractorND(OperatorCore):
     
     def gaussian_eigen(self, image: ArrayLike, framework: Literal["numpy", "torch"] | None = None) -> ArrayLike:
         """
-        Compute Gaussian eigenvalues over a sliding window (Torch or NumPy).
+        Compute curvature-based eigenvalues after Gaussian smoothing.
+
+        Applies a Gaussian filter over the image, then extracts curvature
+        eigenvalues using the selected backend.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        framework : {'numpy', 'torch'}, optional
+            Backend to use for computation. If None, uses the default.
+
+        Returns
+        -------
+        ArrayLike
+            Array of curvature eigenvalues derived from the smoothed image.
         """
         fw = framework or self.framework
         gaussian = self.gaussian(image, output_format=fw)
         return self.curvatures_nd(gaussian, mode="eigen")
 
-    def kurtosis_local(self, image: ArrayLike, framework: Literal["numpy", "torch"] | None = None, output_format: Literal["numpy", "torch"] | None = None) -> ArrayLike:
+    def kurtosis_local(
+        self,
+        image: ArrayLike,
+        framework: Literal["numpy", "torch"] | None = None,
+        output_format: Literal["numpy", "torch"] | None = None
+    ) -> ArrayLike:
         """
-        Compute local kurtosis over a sliding window (ND-compatible).
+        Compute the local kurtosis over a sliding window (N-D compatible).
+
+        Uses the definition of kurtosis as the normalized fourth central moment.
+        Applies local mean and standard deviation, and tracks metadata throughout.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        framework : {'numpy', 'torch'}, optional
+            Backend used for computation. If None, uses the configured default.
+        output_format : {'numpy', 'torch'}, optional
+            Desired format for the result. If None, uses the default.
+
+        Returns
+        -------
+        ArrayLike
+            Image of local kurtosis values, in the selected output format.
         """
         eps = 1e-6
         fw = framework or self.framework
@@ -702,9 +966,31 @@ class FeatureExtractorND(OperatorCore):
         kurtosis = tracker.copy_to((fourth_moment / (std ** 4 + eps))).get()
         return self.to_output(kurtosis, framework=out)
 
-    def skewness_local(self, image: ArrayLike, framework: Literal["numpy", "torch"] | None = None, output_format: Literal["numpy", "torch"] | None = None) -> ArrayLike:
+    def skewness_local(
+        self,
+        image: ArrayLike,
+        framework: Literal["numpy", "torch"] | None = None,
+        output_format: Literal["numpy", "torch"] | None = None
+    ) -> ArrayLike:
         """
-        Compute local skewness over a sliding window (ND-compatible).
+        Compute the local skewness over a sliding window (N-D compatible).
+
+        Uses the third central moment normalized by the cube of the local standard deviation.
+        The computation is backend-agnostic and preserves metadata via tracking.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        framework : {'numpy', 'torch'}, optional
+            Backend to use for internal computation. If None, uses default.
+        output_format : {'numpy', 'torch'}, optional
+            Desired output format. If None, uses configured default.
+
+        Returns
+        -------
+        ArrayLike
+            Image of local skewness values in the selected output format.
         """
         eps = 1e-6
         fw = framework or self.framework
@@ -721,7 +1007,22 @@ class FeatureExtractorND(OperatorCore):
 
     def entropy_local(self, image: ArrayLike, bins: int = 16) -> ArrayLike:
         """
-        Compute local entropy over a sliding window, ND-compatible via ImageProcessor.
+        Compute local entropy over a sliding window using histogram-based estimation.
+
+        The computation is N-D compatible and backend-aware (NumPy or Torch).
+        Histogram bins are computed per local patch and entropy is estimated accordingly.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        bins : int, default=16
+            Number of bins used to compute the local histogram.
+
+        Returns
+        -------
+        ArrayLike
+            Image of local entropy values.
         """
         eps = 1e-8
 
@@ -744,7 +1045,25 @@ class FeatureExtractorND(OperatorCore):
   
     def entropy_spectral_local(self, image: ArrayLike) -> ArrayLike:
         """
-        Compute local spectral entropy from FFT magnitude (ND, torch or numpy).
+        Compute local spectral entropy from FFT magnitude (N-D compatible).
+
+        Applies a Fourier Transform over local patches and estimates entropy
+        from the power spectrum, using the appropriate backend (NumPy or Torch).
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+
+        Returns
+        -------
+        ArrayLike
+            Image of local spectral entropy values.
+
+        Raises
+        ------
+        ValueError
+            If the input type or configured framework is unsupported.
         """
         if self.framework == "torch" or isinstance(image, torch.Tensor):
             return self._entropy_spectral_local_torch(image)
@@ -755,19 +1074,20 @@ class FeatureExtractorND(OperatorCore):
 
     def _entropy_spectral_local_torch(self, image: torch.Tensor) -> torch.Tensor:
         """
-        Compute local spectral entropy using sliding windows (Torch, ND), handling optional channel axis.
+        Compute local spectral entropy using sliding windows in N-D Torch tensors.
+
+        Applies FFT on local patches to estimate spectral entropy,
+        accounting for the presence of a channel axis if defined.
 
         Parameters
         ----------
         image : torch.Tensor
-            Input ND image (with or without channels).
-        channel_axis : int or None
-            Axis index for channels, or None if no channel.
+            Input N-D image (with or without channel axis).
 
         Returns
         -------
         torch.Tensor
-            Entropy map of same shape (spatial dimensions only).
+            Spectral entropy map with same spatial shape as input (channels preserved if present).
         """
         eps = 1e-8
         dims = image.dim()
@@ -823,8 +1143,20 @@ class FeatureExtractorND(OperatorCore):
         
     def _entropy_spectral_local_numpy(self, image: np.ndarray) -> np.ndarray:
         """
-        Compute local spectral entropy using sliding windows, handling optional channel axis.
-        
+        Compute local spectral entropy using sliding windows in N-D NumPy arrays.
+
+        Applies FFT on local patches to estimate spectral entropy,
+        accounting for the presence of a channel axis if defined.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            Input N-D image (with or without channel axis).
+
+        Returns
+        -------
+        np.ndarray
+            Spectral entropy map with same spatial shape as input (channels preserved if present).
         """
         eps = 1e-8
         ndim = image.ndim
@@ -1082,9 +1414,35 @@ class FeatureExtractorND(OperatorCore):
         framework: Framework = "auto",
     ) -> Dict[str, ArrayLike]:
         """
-        Compute Haralick-like texture descriptors from local GLCM(s), ND-compatible, auto framework.
+        Compute Haralick-like texture descriptors from local GLCMs (Gray-Level Co-occurrence Matrices).
 
+        Supports N-dimensional images and automatically selects the backend (NumPy or Torch).
+        Outputs selected texture descriptors (e.g., contrast, homogeneity, entropy) per window.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        window_size : int, default=5
+            Size of the sliding window used to compute GLCMs.
+        levels : int, default=8
+            Number of gray levels used in quantization.
+        offsets : list of tuple[int], optional
+            List of relative offsets (directions) used to compute GLCMs.
+            If None, a default set is inferred for the image dimensionality.
+        mode : {'single', 'mean'}, default='single'
+            - 'single': returns descriptors per offset.
+            - 'mean'  : returns average over all offsets.
+        framework : {'numpy', 'torch', 'auto'}, default='auto'
+            Backend used for computation. 'auto' infers from the input type.
+
+        Returns
+        -------
+        dict
+            Dictionary of texture descriptor maps, keyed by descriptor name.
+            For example: {'contrast': array, 'homogeneity': array, ...}
         """
+
         if framework == "torch" or (framework == "auto" and isinstance(image, torch.Tensor)):
             return self._glcm_torch_nd(image, window_size, levels, offsets, mode)
         else:
@@ -1396,10 +1754,36 @@ class FeatureExtractorND(OperatorCore):
         return features_accumulator
     
     # ------------------ Local Histogram Bins ------------------ #    
-
     def local_histogram_bins(
-        self, image: ArrayLike, window_size: int = 5, n_bins: int = 8, framework: Framework = "auto"
+        self,
+        image: ArrayLike,
+        window_size: int = 5,
+        n_bins: int = 8,
+        framework: Framework = "auto"
     ) -> ArrayLike:
+        """
+        Compute local histograms over a sliding window using a fixed number of bins.
+
+        The function supports both NumPy and Torch backends, automatically selecting
+        the appropriate implementation based on input type or explicit choice.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        window_size : int, default=5
+            Size of the local sliding window.
+        n_bins : int, default=8
+            Number of histogram bins.
+        framework : {'numpy', 'torch', 'auto'}, default='auto'
+            Backend used for computation. If 'auto', inferred from the input type.
+
+        Returns
+        -------
+        ArrayLike
+            Local histograms with one histogram per window position.
+            Output shape may include a new bin axis depending on backend.
+        """
         if framework == "auto":
             framework = "torch" if torch.is_tensor(image) else "numpy"
 
@@ -1410,10 +1794,33 @@ class FeatureExtractorND(OperatorCore):
         else:
             raise ValueError(f"Unsupported framework: {framework}")
     def local_histogram_bins_torch(
-        self, image: torch.Tensor, window_size: int = 5, n_bins: int = 8
+        self,
+        image: torch.Tensor,
+        window_size: int = 5,
+        n_bins: int = 8
     ) -> torch.Tensor:
         """
-        Compute local histograms over sliding windows (Torch, ND, multi-channel supported).
+        Compute local histograms over sliding windows using PyTorch (N-D compatible, multi-channel aware).
+
+        Each local patch is quantized into `n_bins`, and a normalized histogram is computed
+        per spatial location, preserving the channel axis if present.
+
+        Parameters
+        ----------
+        image : torch.Tensor
+            Input image tensor (any number of dimensions).
+        window_size : int, default=5
+            Size of the local window applied over spatial axes.
+        n_bins : int, default=8
+            Number of bins used for quantization.
+
+        Returns
+        -------
+        torch.Tensor
+            Local histogram tensor with shape:
+            - (C, ..., n_bins) if channel axis is present
+            - (..., n_bins) otherwise
+            All spatial dimensions are preserved, and an extra histogram axis is appended.
         """
         eps = 1e-8
         device = image.device
@@ -1465,10 +1872,32 @@ class FeatureExtractorND(OperatorCore):
 
         
     def local_histogram_bins_numpy(
-        self, image: np.ndarray, window_size: int = 5, n_bins: int = 8
+        self,
+        image: np.ndarray,
+        window_size: int = 5,
+        n_bins: int = 8
     ) -> np.ndarray:
         """
-        Compute local histograms over sliding windows (NumPy, ND, multi-channel supported).
+        Compute local histograms over sliding windows using NumPy (N-D compatible, multi-channel aware).
+
+        Each local patch is quantized into `n_bins`, and a normalized histogram is computed
+        per spatial location. Handles presence of a channel axis and preserves original layout.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            Input image (N-D NumPy array).
+        window_size : int, default=5
+            Size of the local window applied over spatial axes. Must be odd.
+        n_bins : int, default=8
+            Number of histogram bins used for quantization.
+
+        Returns
+        -------
+        np.ndarray
+            Local histogram array with shape:
+            - (..., n_bins) if no channel axis
+            - shape with n_bins appended to each channel slice otherwise
         """
         eps = 1e-8
         ndim = image.ndim
@@ -2255,7 +2684,6 @@ class FeatureExtractorND(OperatorCore):
         return self.to_output(self.track(image).copy_to(result).get())
 
     # ------------------ Ridge Filter ------------------ #
-    
     def ridge_filter_nd(
         self,
         image: ArrayLike,
@@ -2267,9 +2695,33 @@ class FeatureExtractorND(OperatorCore):
         framework: Framework = "auto",
     ) -> ArrayLike:
         """
-        Enhance ridge-like structures using Hessian eigenvalues (numpy or torch, ND-compatible).
+        Enhance ridge-like structures using Hessian-based eigenvalue filtering (N-D compatible).
+
+        Supports common vesselness/ridge detection modes such as Frangi, Sato, Meijering,
+        with automatic backend dispatch (NumPy or Torch).
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or PyTorch tensor).
+        sigma : float, default=1.0
+            Standard deviation for Gaussian smoothing prior to Hessian computation.
+        beta : float, default=0.5
+            Sensitivity to the second eigenvalue (vesselness contrast).
+        c : float, default=15.0
+            Sensitivity to the Frobenius norm (background suppression).
+        eps : float, default=1e-8
+            Small constant to avoid numerical instability.
+        mode : {'frangi', 'sato', 'meijering', 'neg_eig'}, default='frangi'
+            Ridge enhancement formulation to apply.
+        framework : {'numpy', 'torch', 'auto'}, default='auto'
+            Computation backend. If 'auto', inferred from input type.
+
+        Returns
+        -------
+        ArrayLike
+            Ridge-enhanced image, in the same format as input or converted to default output format.
         """
-        
         if framework == "auto":
             framework = "torch" if torch.is_tensor(image) else "numpy"
         if framework == "torch":
@@ -2957,23 +3409,29 @@ class FeatureExtractorND(OperatorCore):
         framework: Framework = "auto",
     ) -> Dict[str, ArrayLike]:
         """
-        Compute region-based statistics over labeled regions (ND, multichannel, auto framework).
+        Compute region-based statistics over labeled regions (N-D compatible, multi-channel aware).
+
+        Automatically selects the appropriate backend (NumPy or Torch) based on the input
+        or user-specified preference. Supports standard statistics over segmented regions.
 
         Parameters
         ----------
-        image : np.ndarray | torch.Tensor
-            Input image, scalar or multichannel. Shape (C, ...) or (...,).
-        labels : np.ndarray | torch.Tensor
-            Label map with same spatial shape (no channel).
-        stats : tuple of str
-            Statistics to compute: 'mean', 'std', 'min', 'max', 'count'.
-        framework : str
-            'torch', 'numpy', or 'auto'.
+        image : np.ndarray or torch.Tensor
+            Input image (scalar or multi-channel), shape (C, ...) or (...,).
+        labels : np.ndarray or torch.Tensor
+            Label map with same spatial shape as the image (excluding channels).
+        stats : Sequence[str], default=('mean',)
+            List of statistics to compute per region. Supported values:
+            {'mean', 'std', 'min', 'max', 'count'}
+        framework : {'numpy', 'torch', 'auto'}, default='auto'
+            Backend to use for computation. If 'auto', inferred from the input type.
 
         Returns
         -------
-        dict[str, np.ndarray | torch.Tensor]
-            Dictionary of region-wise stats. Shape (n_labels,) or (n_labels, C).
+        dict of str → ArrayLike
+            Dictionary mapping each requested statistic to a tensor or array of shape:
+            - (n_labels,) if scalar image
+            - (n_labels, C) if multi-channel image
         """
         if framework == "auto":
             framework = "torch" if torch.is_tensor(image) else "numpy"
@@ -2989,28 +3447,34 @@ class FeatureExtractorND(OperatorCore):
 
 
     def region_based_stats_nd_torch(
-        self, image: torch.Tensor, labels: torch.Tensor, stats: Sequence[str] = ("mean",)
+        self,
+        image: torch.Tensor,
+        labels: torch.Tensor,
+        stats: Sequence[str] = ("mean",)
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute region-based statistics using Torch backend (ND, multi-channel).
+        Compute region-based statistics using the Torch backend (N-D compatible, multi-channel aware).
+
+        Supports basic per-region statistics such as mean, std, min, max, and count.
+        Handles explicit channel axes using movedim and vectorized reduction with scatter operations.
 
         Parameters
         ----------
         image : torch.Tensor
-            Input image, shape (C, ...) or (...,) if no channel.
+            Input image tensor, shape (C, ...) if channel axis is defined, or (...,) for scalar input.
         labels : torch.Tensor
-            Label map of same spatial shape (no channel).
-        stats : tuple of str
-            List of statistics: 'mean', 'std', 'min', 'max', 'count'.
-        channel_axis : int or None
-            Channel axis, or None if scalar image.
+            Integer label map of same spatial shape as image (excluding channels).
+        stats : Sequence[str], default=('mean',)
+            List of statistics to compute per region. Supported values:
+            {'mean', 'std', 'min', 'max', 'count'}
 
         Returns
         -------
-        dict[str, torch.Tensor]
-            Each stat is (n_labels,) if scalar image, or (n_labels, C) if multichannel.
-            
-        """   
+        dict of str → torch.Tensor
+            Dictionary mapping each requested statistic to a tensor of shape:
+            - (n_labels, C) if multi-channel,
+            - (n_labels,) if single-channel.
+        """  
         channel_axis = self.get_axis(image, "channel_axis")
         
         if channel_axis is not None:
@@ -3064,10 +3528,33 @@ class FeatureExtractorND(OperatorCore):
         return result
     
     def region_based_stats_nd_numpy(
-        self, image: np.ndarray, labels: np.ndarray, stats: Sequence[str] = ("mean",)
+        self,
+        image: np.ndarray,
+        labels: np.ndarray,
+        stats: Sequence[str] = ("mean",)
     ) -> Dict[str, np.ndarray]:
         """
-        NumPy version of region-based statistics (ND, multichannel).
+        Compute region-based statistics from a labeled image using NumPy (N-D, multi-channel supported).
+
+        Supports basic statistics per labeled region, including mean, std, min, max, and count.
+        Channels are handled explicitly if a channel axis is defined.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            Input image, either single-channel or multi-channel (with axis declared in tag).
+        labels : np.ndarray
+            Label array with same spatial shape as the image (excluding channel axis).
+        stats : Sequence[str], default=('mean',)
+            List of statistics to compute per region. Supported values:
+            {'mean', 'std', 'min', 'max', 'count'}
+
+        Returns
+        -------
+        dict of str → np.ndarray
+            Dictionary mapping each requested statistic to an array of shape:
+            - (C, n_labels) if image has channels,
+            - (n_labels,) otherwise
         """
         if labels.shape != image.shape[-labels.ndim:]:
             raise ValueError("Image and label spatial shapes must match.")
@@ -3150,14 +3637,53 @@ def feature_extractor(
     Tuple[List[ArrayLike], List[str]],
 ]:
     """
-    Convenience wrapper to build and run FeatureExtractorND with simple arguments.
+    Convenience wrapper to build and apply FeatureExtractorND with simplified configuration.
 
-    Notes
-    -----
-    - Preserves input backend by default (NumPy in → NumPy out; Torch in → Torch out).
-    - `combine_features` toggles chained features defined via 'comb'.
-    """
-    
+    This function initializes the full feature extraction pipeline (edge, diff, convolve, etc.)
+    and runs it on a given image, while handling backend and layout policies automatically.
+
+    Parameters
+    ----------
+    img : ArrayLike
+        Input image (NumPy array or PyTorch tensor).
+    features : Any, optional
+        Feature specification: string, list, or dict (as supported by FeatureExtractorND).
+    combine_features : bool, optional
+        Whether to use the 'comb' key to chain features.
+    framework : {'numpy', 'torch'}, default='numpy'
+        Backend framework for processing.
+    output_format : {'numpy', 'torch'}, default='numpy'
+        Format for the output result.
+    layout_name : str, default='HWC'
+        Layout string (e.g., 'HWC', 'NCHW') used for axis tagging.
+    layout_framework : {'numpy', 'torch'}, default='numpy'
+        Framework used to interpret the layout.
+    edge_strategy : str, default='gradient'
+        Edge detection method (e.g., 'canny', 'gradient', 'sobel', etc.).
+    diff_strategy : str, optional
+        Gradient operator strategy ('auto', 'torch', 'vectorized', etc.).
+    conv_strategy : str, optional
+        Convolution backend strategy ('fft', 'spatial', 'torch', etc.).
+    processor_strategy : str, optional
+        Strategy for local window processing ('vectorized', 'parallel', 'torch', etc.).
+    window_size : int, default=3
+        Size of the local window for filters and statistical features.
+    sigma : float or Sequence[float], default=1.0
+        Gaussian smoothing parameter.
+    dim : int, default=2
+        Dimensionality used for convolution kernels.
+    stack : bool, default=True
+        Whether to stack feature maps along a new axis.
+    return_feat_names : bool, default=False
+        If True, return a tuple (features, feature_names).
+    block_mode : bool, default=False
+        Whether to split features into logical blocks internally.
+
+    Returns
+    -------
+    Union[ArrayLike, Tuple, List]
+        Extracted feature maps. The exact return type depends on `stack` and `return_feat_names`.
+    """    
     # ====[ Fallback ]====
     edge_strategy=edge_strategy or "gradient"
     diff_strategy=diff_strategy or "vectorized" if framework == "numpy" else "torch"

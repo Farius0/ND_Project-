@@ -79,13 +79,45 @@ class OperatorCore(BaseConverter):
         super().__init__(layout_cfg=self.layout_cfg, global_cfg=self.global_cfg)
 
     # ====[ RESOLVE AXIS – Get Axis from Image ]====
-    def resolve_axis(self, *args, default: Optional[Any]=None) -> Optional[Any]:
-        """Return the first non-None value among `args`, otherwise `default`."""
+    def resolve_axis(self, *args, default: Optional[Any] = None) -> Optional[Any]:
+        """
+        Return the first non-None value among the arguments, falling back to `default`.
+
+        This is a wrapper that delegates to the base class implementation.
+
+        Parameters
+        ----------
+        *args : Any
+            Sequence of candidate values.
+        default : Any, optional
+            Value to return if all candidates are None.
+
+        Returns
+        -------
+        Any or None
+            First non-None value found, or `default` if none exist.
+        """
         return super().resolve_axis(*args, default=default)
 
     # ====[ ALREADY CONVERTED – Check Conversion Status ]====
     def _already_converted(self, arr: ArrayLike, framework: Literal["numpy", "torch"] = "numpy") -> bool:
-        """Proxy to BaseConverter.already_converted()."""
+        """
+        Check if the array has already been converted according to the target framework.
+
+        This method delegates to `BaseConverter.already_converted()`.
+
+        Parameters
+        ----------
+        arr : ArrayLike
+            Input array or tensor to check.
+        framework : {'numpy', 'torch'}, optional
+            Target framework to check against. Default is 'numpy'.
+
+        Returns
+        -------
+        bool
+            True if the array is already in the expected format, False otherwise.
+        """
         return super().already_converted(arr, framework)
 
     # ====[ CONVERT ONCE (ND-compatible) – OperatorCore ]====
@@ -115,21 +147,52 @@ class OperatorCore(BaseConverter):
         require_status: Optional[str] = None,
     ) -> ArrayLike:
         """
-        Wrapper around BaseConverter.convert_once(), enriched with all axis controls.
+        Convert and tag an image with layout, UID, and axis information.
+
+        This method wraps `BaseConverter.convert_once()` with full control over axes,
+        layout validation, tagging, UID handling, and optional normalization.
 
         Parameters
         ----------
-        image : ndarray | Tensor
-        framework : {'torch','numpy'}, optional
-            Target framework (defaults to self.framework).
-        tag_as : str, default 'processed'
-            Conversion status recorded in the tag.
-        ... (axes/flags identical à BaseConverter.convert_once)
+        image : ArrayLike
+            Input image (NumPy array or Torch tensor) to convert.
+        framework : {'numpy', 'torch'}, optional
+            Target framework for the converted output. Defaults to self.framework.
+        tag_as : str, optional
+            Tag to assign as the conversion status (e.g., 'processed').
+        direction_axis, batch_axis, channel_axis, height_axis, width_axis, depth_axis : int or None
+            Explicit axis positions. Overrides inferred values if provided.
+        add_batch_dim : bool or None, optional
+            If True, add a batch dimension to the image if missing.
+        add_channel_dim : bool or None, optional
+            If True, add a channel dimension to the image if missing.
+        enable_uid : bool, optional
+            If True, assign a unique identifier to the image tag.
+        op_params : dict or None, optional
+            Additional parameters to include in the tag under 'op_params'.
+        track : bool, optional
+            If True, attach a tag with layout and status tracking.
+        trace_limit : int, optional
+            Maximum number of entries in the trace history.
+        normalize_override : bool or None, optional
+            If True, normalize image values even if already processed.
+        force_reset : bool, optional
+            If True, ignore existing tags and reprocess the image.
+        require_shape_match : bool, optional
+            If True, raises an error if image shape does not match expected layout.
+        require_layout_match : bool, optional
+            If True, raises an error if tag layout does not match expected layout.
+        require_uid : bool, optional
+            If True, raises an error if the image lacks a UID after processing.
+        expected_layout_name : str or None, optional
+            Expected layout name (e.g., 'HWC'); used for layout validation.
+        require_status : str or None, optional
+            Required status tag value (e.g., 'raw') before conversion is allowed.
 
         Returns
         -------
-        ndarray | Tensor
-            Tagged image in the requested framework.
+        ArrayLike
+            Converted image (NumPy or Torch) with updated tag.
         """
         fw = self.resolve_axis(framework, self.framework)
 
@@ -189,12 +252,51 @@ class OperatorCore(BaseConverter):
         require_status: Optional[str] = None,
     ) -> ArrayLike:
         """
-        Convert to the operator's output format (e.g., numpy or torch) and tag.
+        Convert an image to the configured output format and apply final tagging.
+
+        This is a wrapper around `convert_once()` specifically used for preparing
+        the final output of an operator, enforcing tagging, layout validation,
+        UID assignment, and output consistency.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image to convert (NumPy array or Torch tensor).
+        framework : {'numpy', 'torch'}, optional
+            Target backend for the output format. Defaults to self.output_format.
+        tag_as : str, optional
+            Status tag to assign after conversion (default: "output").
+        direction_axis, batch_axis, channel_axis, height_axis, width_axis, depth_axis : int or None
+            Optional axis overrides for layout resolution.
+        add_batch_dim : bool or None, optional
+            Whether to add a batch dimension if missing.
+        add_channel_dim : bool or None, optional
+            Whether to add a channel dimension if missing.
+        enable_uid : bool, optional
+            If True, assign a unique identifier to the output image.
+        op_params : dict or None, optional
+            Additional metadata to attach to the tag.
+        track : bool, optional
+            Whether to track layout and status using internal tagging.
+        trace_limit : int, optional
+            Maximum number of recorded trace entries in the tag.
+        normalize_override : bool or None, optional
+            If True, forces normalization even if already done.
+        require_shape_match : bool, optional
+            If True, check shape consistency with the expected layout.
+        require_layout_match : bool, optional
+            If True, enforce layout name match between tag and config.
+        require_uid : bool, optional
+            If True, raise error if UID is missing after conversion.
+        expected_layout_name : str or None, optional
+            Expected layout name used for validation.
+        require_status : str or None, optional
+            Required tag status before allowing conversion (e.g., "processed").
 
         Returns
         -------
-        ndarray | Tensor
-            Converted image with tag.
+        ArrayLike
+            Converted and tagged image in the desired output format.
         """
         return self.convert_once(
             image=image,
@@ -240,20 +342,48 @@ class OperatorCore(BaseConverter):
         require_status: Optional[str] = None,
     ):
         """
-        Ensure that the image layout matches the expected definition ('NCHW', 'GNCDHW', ...).
+        Convert and tag an image to ensure it matches the target layout and format.
+
+        This method enforces a given layout structure (e.g., 'NCHW', 'GNCDHW'),
+        attaches a tag, and wraps the result in an `AxisTracker`.
 
         Parameters
         ----------
-        image : ndarray | Tensor
-        layout : dict
-            Target layout dict (e.g., from get_layout_axes()).
-        framework : {'torch','numpy'}, optional
-        tag_as : str, default 'prepared'
+        image : ArrayLike
+            Input image (NumPy array or Torch tensor) to be formatted.
+        tag_as : str, optional
+            Status string to assign to the tag (default: "prepared").
+        framework : {'numpy', 'torch'}, optional
+            Target framework for the output format.
+        layout : dict, optional
+            Layout dictionary specifying expected axis positions.
+        enable_uid : bool, optional
+            If True, assign a UID to the tag.
+        op_params : dict or None, optional
+            Operator-specific parameters to embed in the tag.
+        track : bool, optional
+            If True, wrap the image in an `AxisTracker`.
+        trace_limit : int, optional
+            Max length of the trace history recorded in the tag.
+        normalize_override : bool or None, optional
+            If True, force re-normalization of image values.
+        force_reset : bool, optional
+            If True, ignore previous tags and reprocess image from scratch.
+        require_shape_match : bool, optional
+            If True, enforce shape match with the expected layout.
+        require_layout_match : bool, optional
+            If True, raise error if layout name does not match expected.
+        require_uid : bool, optional
+            If True, raise error if UID is missing after conversion.
+        expected_layout_name : str or None, optional
+            Expected layout name to validate against.
+        require_status : str or None, optional
+            Expected previous status tag before processing.
 
         Returns
         -------
         AxisTracker
-            Tracker around the converted image, with updated tag.
+            Image wrapped with an AxisTracker containing layout and tag metadata.
         """
         framework = framework or self.framework
 
@@ -291,12 +421,17 @@ class OperatorCore(BaseConverter):
 
     def safe_copy(self, obj: np.ndarray | torch.Tensor):
         """
-        Create a safe copy of a NumPy array or PyTorch tensor and propagate the tag.
+        Create a safe copy of a NumPy array or PyTorch tensor while preserving its tag.
+
+        Parameters
+        ----------
+        obj : ndarray or Tensor
+            Input object to copy. Must be a NumPy array or PyTorch tensor.
 
         Returns
         -------
-        ndarray | Tensor
-            New object with copied tag (if any).
+        ndarray or Tensor
+            A cloned copy of the input with its tag (if any) propagated.
         """
         if isinstance(obj, np.ndarray):
             new_obj = obj.copy()
@@ -315,15 +450,23 @@ class OperatorCore(BaseConverter):
     # ====[ IMAGE SUMMARY – Shape, Tag, Device, etc. ]====
     def summary(self, image: Any, framework: Optional[str] = None, verbose: bool = True, as_tensor: bool = False) -> None:
         """
-        Print a summary (shape, dtype, device, framework, tag).
+        Print a summary of the image including shape, dtype, device, framework, and tag information.
 
         Parameters
         ----------
-        image : ndarray | Tensor
-        framework : {'torch','numpy'}, optional
-        verbose : bool, default True
-        as_tensor : bool, default False
-            Force conversion to the current framework before printing.
+        image : ndarray or Tensor
+            Input image to summarize.
+        framework : {'torch', 'numpy'}, optional
+            Framework to use for format resolution. Defaults to self.framework.
+        verbose : bool, optional
+            If True, prints extended information. Default is True.
+        as_tensor : bool, optional
+            If True, converts image to the target framework before printing.
+
+        Returns
+        -------
+        None
+            The function prints to stdout and does not return a value.
         """
         fw = framework or self.framework
         img = self.convert_once(image, framework=fw, tag_as="summary")
@@ -355,16 +498,53 @@ class OperatorCore(BaseConverter):
 
     # ====[ RESET CONVERSION TAG – Robust Tag Removal ]====
     def purge_all_tags(self, verbose: bool = False) -> None:
-        """Proxy to BaseConverter.purge_all_tags()."""
+        """
+        Remove all registered tags from internal storage.
+
+        This is a direct proxy to `BaseConverter.purge_all_tags()`.
+
+        Parameters
+        ----------
+        verbose : bool, optional
+            If True, print a summary of the purge action.
+
+        Returns
+        -------
+        None
+        """
         return super().purge_all_tags(verbose=verbose)
 
     def purge_tags_for(self, image: np.ndarray | torch.Tensor, verbose: bool = False) -> None:
-        """Proxy to BaseConverter.purge_tags_for()."""
+        """
+        Remove the tag associated with a specific image.
+
+        This is a proxy to `BaseConverter.purge_tags_for()`.
+
+        Parameters
+        ----------
+        image : ndarray or Tensor
+            The image whose tag should be removed.
+        verbose : bool, optional
+            If True, print a message indicating the tag was removed.
+
+        Returns
+        -------
+        None
+        """
         return super().purge_tags_for(image, verbose=verbose)
 
     def reset_conversion_tag(self, image: ArrayLike) -> None:
         """
-        Remove the conversion tag for a given image (NumPy or Torch).
+        Remove the conversion tag from the given image.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            NumPy array or Torch tensor from which to remove the tag.
+
+        Returns
+        -------
+        None
         """
         for fw_loop in ["torch", "numpy"]:
             if self.has_tag(image, fw_loop):
@@ -385,12 +565,23 @@ class OperatorCore(BaseConverter):
         framework_target: str = "torch",
     ) -> ArrayLike:
         """
-        Copy the conversion tag from `source` to `target` (frameworks may differ).
+        Copy the conversion tag from a source image to a target image, possibly across frameworks.
+
+        Parameters
+        ----------
+        source : ArrayLike
+            Source image (NumPy or Torch) from which to copy the tag.
+        target : ArrayLike
+            Target image (NumPy or Torch) to which the tag will be attached.
+        framework_source : {'numpy', 'torch'}, optional
+            Framework used to interpret the source image tag.
+        framework_target : {'numpy', 'torch'}, optional
+            Framework used to attach the tag to the target image.
 
         Returns
         -------
-        target : ndarray | Tensor
-            The target image with the copied tag.
+        ArrayLike
+            Target image with the copied tag metadata.
         """
         tag = self.get_tag(source, framework_source)
         if not tag:
@@ -415,16 +606,22 @@ class OperatorCore(BaseConverter):
         add_new_axis: bool = False,
     ) -> None:
         """
-        Update a specific axis in the conversion tag (e.g., 'channel_axis').
+        Update the value of a specific axis key in the conversion tag.
 
         Parameters
         ----------
-        image : ndarray | Tensor
+        image : ndarray or Tensor
+            The image whose tag will be updated.
         key : str
-            Axis key (e.g., 'channel_axis', 'batch_axis').
-        new_axis : int | None
-        add_new_axis : bool, default False
-            Allow adding the key if missing.
+            Axis key to update (e.g., 'channel_axis', 'batch_axis').
+        new_axis : int or None
+            New axis index to assign to the key. If None, the key may be removed or ignored.
+        add_new_axis : bool, optional
+            If True, allows adding the key if it does not already exist in the tag.
+
+        Returns
+        -------
+        None
         """
         fw = "numpy" if isinstance(image, np.ndarray) else "torch"
         tag = self.get_tag(image, fw)
@@ -441,11 +638,17 @@ class OperatorCore(BaseConverter):
     # ====[ TRACK – Attach AxisTracker to Image or return class ]====
     def track(self, image: Optional[ArrayLike] = None):
         """
-        Attach an AxisTracker to the image, or return the class when image is None.
+        Attach an AxisTracker to the image, or return the AxisTracker class if image is None.
+
+        Parameters
+        ----------
+        image : ArrayLike or None, optional
+            Image to wrap with an AxisTracker. If None, returns the AxisTracker class itself.
 
         Returns
         -------
-        AxisTracker | type[AxisTracker]
+        AxisTracker or type[AxisTracker]
+            Tracked image instance, or the AxisTracker class object.
         """
         from operators.axis_tracker import AxisTracker
 
@@ -456,11 +659,21 @@ class OperatorCore(BaseConverter):
     # ====[ Safe Axis Access from Tracked Images ]====
     def get_axis(self, image: ArrayLike, key: str, default: Any = None) -> Optional[int]:
         """
-        Retrieve a specific axis from the AxisTracker tag of a given image.
+        Retrieve the index of a specific axis from the tag associated with the image.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Image (NumPy array or Torch tensor) carrying an AxisTracker tag.
+        key : str
+            Axis key to retrieve (e.g., 'channel_axis', 'height_axis').
+        default : Any, optional
+            Value to return if the key is not present in the tag.
 
         Returns
         -------
-        int | None
+        int or None
+            Axis index if found, otherwise the provided default.
         """
         if isinstance(image, np.ndarray):
             fw = "numpy"
@@ -490,15 +703,25 @@ class OperatorCore(BaseConverter):
         ),
     ) -> None:
         """
-        Sync missing axis configuration from the image tag into this operator.
+        Sync axis configuration from the image tag into the current operator.
+
+        This method copies axis definitions (e.g., 'height_axis') from the image's
+        AxisTracker tag into the operator's layout configuration.
 
         Parameters
         ----------
-        image : ndarray | Tensor
-        override_axes : bool, default False
-            If True, override existing values with tag values (when present).
-        update_layout : bool, default True
-            If True, also copy 'layout_name'.
+        image : ndarray or Tensor
+            Image from which to read tag metadata.
+        override_axes : bool, optional
+            If True, existing axis values in the operator will be overwritten by tag values.
+        update_layout : bool, optional
+            If True, also update the layout name ('layout_name') from the tag.
+        axes : tuple of str, optional
+            Axis keys to synchronize. Default includes all major semantic axes.
+
+        Returns
+        -------
+        None
         """
         fw = "numpy" if isinstance(image, np.ndarray) else "torch"
         tag = self.get_tag(image, fw) if self.has_tag(image, fw) else None
@@ -518,12 +741,24 @@ class OperatorCore(BaseConverter):
 
     def merge_axes(self, image: ArrayLike, axis1: int, axis2: int) -> ArrayLike:
         """
-        Merge two axes into a single axis (e.g., merge direction and batch).
+        Merge two axes into a single axis in the image (e.g., direction and batch).
+
+        The specified axes are merged by reshaping the image; the corresponding tag
+        is automatically updated using AxisTracker.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or Torch tensor) with at least `axis1` and `axis2`.
+        axis1 : int
+            First axis to merge.
+        axis2 : int
+            Second axis to merge.
 
         Returns
         -------
-        ndarray | Tensor
-            New image with merged axes; tag is updated via AxisTracker.
+        ArrayLike
+            New image with the specified axes merged; the tag is updated accordingly.
         """
         tracker = self.track(image)
         shape = list(tracker.image.shape)
@@ -545,11 +780,21 @@ class OperatorCore(BaseConverter):
 
     def remove_axis(self, image: ArrayLike, axis: int) -> ArrayLike:
         """
-        Remove a specific axis from the image (squeeze operation).
+        Remove a specific axis from the image using a squeeze operation.
+
+        The corresponding tag is updated to reflect the new shape.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or Torch tensor).
+        axis : int
+            Index of the axis to remove. Must be of size 1.
 
         Returns
         -------
-        ndarray | Tensor
+        ArrayLike
+            Image with the specified axis removed and tag updated.
         """
         tracker = self.track(image)
         shape = tracker.image.shape
@@ -571,17 +816,43 @@ class OperatorCore(BaseConverter):
 
     def reposition_axis(self, image: ArrayLike, src_axis: int, dst_axis: int) -> ArrayLike:
         """
-        Reposition an axis in the image (e.g., move channel axis to first).
+        Move a specific axis from one position to another within the image.
+
+        Useful for rearranging axes (e.g., moving the channel axis to the first position).
+        The associated tag is updated accordingly.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or Torch tensor).
+        src_axis : int
+            Index of the axis to move.
+        dst_axis : int
+            Target position for the axis.
 
         Returns
         -------
-        ndarray | Tensor
+        ArrayLike
+            Image with the axis repositioned and tag updated.
         """
         return self.track(image).moveaxis(src_axis, dst_axis).image
 
     # ====[ Tag lock helpers ]====
     def lock_tag(self, image: ArrayLike, framework: Optional[str] = None) -> None:
-        """Lock the tag associated with the image to prevent in-place modification."""
+        """
+        Lock the tag associated with the image to prevent further in-place modifications.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or Torch tensor) whose tag will be locked.
+        framework : {'numpy', 'torch'}, optional
+            Framework used to resolve the tag location. Defaults to self.framework.
+
+        Returns
+        -------
+        None
+        """
         fw = framework or ("torch" if isinstance(image, torch.Tensor) else "numpy")
         tag = self.get_tag(image, fw)
         if tag is not None:
@@ -589,7 +860,20 @@ class OperatorCore(BaseConverter):
             self.set_tag(image, fw, tag)
 
     def unlock_tag(self, image: ArrayLike, framework: Optional[str] = None) -> None:
-        """Unlock the tag to allow modifications."""
+        """
+        Unlock the tag associated with the image, allowing in-place modifications.
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Input image (NumPy array or Torch tensor) whose tag will be unlocked.
+        framework : {'numpy', 'torch'}, optional
+            Framework used to resolve the tag location. Defaults to self.framework.
+
+        Returns
+        -------
+        None
+        """
         fw = framework or ("torch" if isinstance(image, torch.Tensor) else "numpy")
         tag = self.get_tag(image, fw)
         if tag is not None and "__locked__" in tag:
@@ -597,7 +881,21 @@ class OperatorCore(BaseConverter):
             self.set_tag(image, fw, tag)
 
     def is_locked(self, image: ArrayLike, framework: Optional[str] = None) -> bool:
-        """Return True if the tag is locked (read-only)."""
+        """
+        Check whether the tag associated with the image is currently locked (read-only).
+
+        Parameters
+        ----------
+        image : ArrayLike
+            Image (NumPy array or Torch tensor) to check.
+        framework : {'numpy', 'torch'}, optional
+            Framework used to access the tag. Defaults to self.framework.
+
+        Returns
+        -------
+        bool
+            True if the tag is locked, False otherwise.
+        """
         fw = framework or ("torch" if isinstance(image, torch.Tensor) else "numpy")
         tag = self.get_tag(image, fw)
         return bool(tag.get("__locked__", False)) if tag else False

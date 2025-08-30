@@ -27,6 +27,18 @@ Framework = Literal["numpy", "torch"]
 # ==================================================
 
 class ThresholdingOperator(OperatorCore):
+    """
+    ND thresholding operator for binary mask generation or intensity separation.
+
+    Supports classic thresholding methods (e.g., Otsu) and applies them in a 
+    layout-aware and dual-backend manner via `OperatorCore`.
+
+    Notes
+    -----
+    - Compatible with 2D, 3D, or batched ND images.
+    - Can return binary masks (`as_mask=True`) or retain raw intensity splits.
+    - Designed to integrate with full layout and UID tagging pipeline.
+    """
     def __init__(
         self,
         method: str = "otsu",
@@ -35,7 +47,22 @@ class ThresholdingOperator(OperatorCore):
         layout_cfg: LayoutConfig = LayoutConfig(),
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
-        
+        """
+        Initialize the thresholding operator with method selection and layout-aware configs.
+
+        Parameters
+        ----------
+        method : str, default 'otsu'
+            Thresholding method to use (e.g., 'otsu', 'manual', or custom).
+        as_mask : bool, default True
+            If True, returns a binary mask; otherwise returns the intensity-split image.
+        img_process_cfg : ImageProcessorConfig
+            Processor configuration for applying the operation (strategy, return format, etc.).
+        layout_cfg : LayoutConfig
+            Axis layout configuration for spatial awareness and tagging.
+        global_cfg : GlobalConfig
+            Global processing options (framework, device, output format, etc.).
+        """ 
         # ====[ Configuration ]====
         self.layout_cfg: LayoutConfig = layout_cfg
         self.global_cfg: GlobalConfig = global_cfg
@@ -103,20 +130,35 @@ class ThresholdingOperator(OperatorCore):
         normalize_override: bool | None = None,
     ) -> ArrayLike:
         """
-        Apply the selected thresholding method.
+        Apply thresholding to an ND image using the configured method.
+
+        The input is first normalized (if required), tagged, and passed to the thresholding
+        function. Output is then converted to the requested backend with full tagging.
 
         Parameters
         ----------
         image : ndarray | Tensor
-            Input image/volume (ND). Per-channel thresholding is handled upstream.
-        as_mask : bool (from constructor)
-            If True, returns a binary mask in the same backend.
-            If False, returns the scalar threshold per slice/channel.
+            Input ND image or volume to threshold.
+        enable_uid : bool, default False
+            Whether to attach a UID to the output.
+        op_params : dict or None, optional
+            Optional metadata parameters to embed in the tag.
+        framework : {'numpy', 'torch'} or None, optional
+            Backend to use for internal processing. Defaults to current configuration.
+        output_format : {'numpy', 'torch'} or None, optional
+            Format to return the result in. Defaults to `self.output_format`.
+        track : bool, default True
+            Whether to propagate axis and layout tags from the input.
+        trace_limit : int, default 10
+            Number of levels to retain in UID trace history (if UID is enabled).
+        normalize_override : bool or None
+            Optional override for automatic normalization before thresholding.
 
         Returns
         -------
         ndarray | Tensor
-            Tagged output in the requested format.
+            Thresholded output. Either a binary mask (if `as_mask=True`) or a thresholded image,
+            formatted and tagged according to output preferences.
         """
         image = self.convert_once(
             image=image,
@@ -143,6 +185,26 @@ class ThresholdingOperator(OperatorCore):
 
     # ------------------- Internals -------------------
     def _get_threshold_func(self) -> Callable:
+        """
+        Return the thresholding function corresponding to the selected method.
+
+        Supported methods include:
+        - 'otsu'
+        - 'yen'
+        - 'isodata'
+        - 'li'
+        - 'triangle'
+
+        Returns
+        -------
+        Callable
+            Function that computes the scalar threshold from an ND array.
+
+        Raises
+        ------
+        ValueError
+            If the selected method is not among the supported ones.
+        """
         methods: Dict[str, Callable] = {
             "otsu": threshold_otsu,
             "yen": threshold_yen,
@@ -160,6 +222,26 @@ class ThresholdingOperator(OperatorCore):
 
 
     def _apply_threshold(self, image: ArrayLike) -> ArrayLike:
+        """
+        Apply the configured thresholding method to an ND image.
+
+        Notes
+        -----
+        - Applies slice-wise thresholding for multi-dimensional arrays.
+        - Automatically handles both NumPy and Torch backends.
+        - Output is either a binary mask or scalar threshold, depending on `as_mask`.
+
+        Parameters
+        ----------
+        image : ndarray | Tensor
+            Input image or volume. Must be real-valued (float or integer).
+
+        Returns
+        -------
+        ndarray | Tensor
+            Binary mask (same shape as input) if `as_mask=True`,
+            or scalar threshold(s) if `as_mask=False`, backend-preserved.
+        """
         threshold_func = self._get_threshold_func()
 
         def apply_single_channel(slice_: ArrayLike):
@@ -179,5 +261,12 @@ class ThresholdingOperator(OperatorCore):
         self.processor.function = apply_single_channel
         processor = self.processor
 
-        result = processor(image)
+        result = processor(image)        
+        
+        if not self.as_mask:
+            # Consolidate thresholds into tensor or array
+            if isinstance(image, torch.Tensor):
+                return torch.tensor(result, dtype=image.dtype, device=image.device)
+            return np.array(result, dtype=image.dtype)
+
         return self.to_output(result, tag_as="thresholded")

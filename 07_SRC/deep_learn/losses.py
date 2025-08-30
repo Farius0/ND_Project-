@@ -30,8 +30,20 @@ __all__ = [
 
 def ensure_target_shape(targets: torch.Tensor) -> torch.Tensor:
     """
-    Ensure target tensor has shape (B, H, W) and integer dtype.
-    Accepts (B, 1, H, W) and squeezes the channel dim if 1.
+    Ensure that a target tensor has shape (B, H, W) and integer dtype.
+
+    If the input has shape (B, 1, H, W), the singleton channel dimension is removed.
+    Raises an error for unsupported shapes.
+
+    Parameters
+    ----------
+    targets : torch.Tensor
+        Target tensor of shape (B, H, W) or (B, 1, H, W).
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor with shape (B, H, W) and dtype long (integer class labels).
     """
     if targets.ndim == 4:
         if targets.shape[1] == 1:
@@ -42,10 +54,30 @@ def ensure_target_shape(targets: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"Expected targets with 3 or 4 dimensions, got {targets.ndim} and shape {tuple(targets.shape)}")
     return targets.long()
 
-def compute_class_imbalance(targets: torch.Tensor, n_classes: int, ignore_index: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+def compute_class_imbalance(
+    targets: torch.Tensor,
+    n_classes: int,
+    ignore_index: Optional[int] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute class frequency imbalance ratios in the current batch.
-    Returns (imbalance, freq) with sum(freq)=1 (if any valid pixel), 0 otherwise.
+    Compute class imbalance ratios and normalized class frequencies.
+
+    Parameters
+    ----------
+    targets : torch.Tensor
+        Target tensor of shape (B, H, W) with class indices.
+    n_classes : int
+        Total number of classes (excluding ignored ones).
+    ignore_index : int, optional
+        Label value to ignore when computing frequencies (e.g., 255 for unlabeled).
+
+    Returns
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        - imbalance : torch.Tensor
+            Ratio of maximum frequency to each class frequency (1 if balanced).
+        - freq : torch.Tensor
+            Normalized frequency of each class (sums to 1 if valid pixels exist, 0 otherwise).
     """
     targets = targets.clone()
     if ignore_index is not None:

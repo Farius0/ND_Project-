@@ -18,7 +18,21 @@ Mode = Literal["replace", "masked_noised", "grid_noised"]
 
 
 def _ensure_bool_mask(mask: ArrayLike, framework: Framework) -> ArrayLike:
-    """Ensure a boolean mask with the same backend."""
+    """
+    Ensure that a mask is of boolean type and matches the specified framework.
+
+    Parameters
+    ----------
+    mask : ArrayLike
+        Input mask array or tensor (NumPy or PyTorch).
+    framework : {"numpy", "torch"}
+        Target backend framework to enforce (determines conversion method).
+
+    Returns
+    -------
+    ArrayLike
+        Boolean mask in the same framework as specified.
+    """
     if framework == "torch":
         if not isinstance(mask, torch.Tensor):
             raise TypeError("Torch backend expects a torch.Tensor mask.")
@@ -37,8 +51,26 @@ def _generate_mask(
     seed: Optional[int] = None,
 ) -> ArrayLike:
     """
-    Generate a random boolean mask with P(False) ~= threshold (i.e., 'holes' rate ~ threshold).
-    True => keep original pixel; False => candidate for inpainting.
+    Generate a random boolean mask where pixels are dropped with probability ≈ threshold.
+
+    A value of True means the pixel is kept; False means the pixel is masked out
+    (e.g., for inpainting or degradation).
+
+    Parameters
+    ----------
+    image : ArrayLike
+        Input image array or tensor (NumPy or PyTorch).
+    threshold : float
+        Approximate probability of dropping a pixel (i.e., P(False) ≈ threshold).
+    framework : {"numpy", "torch"}
+        Backend to use for random number generation and array creation.
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    ArrayLike
+        Boolean mask with the same shape as the input image.
     """
     if not (0.0 <= threshold < 1.0):
         raise ValueError("threshold must be in [0, 1).")
@@ -66,7 +98,29 @@ def _mode_replace(
     seed: Optional[int] = None,
 ) -> Tuple[ArrayLike, ArrayLike]:
     """
-    Replace only the masked-out region (mask == False) by noisy samples, keep mask==True unchanged.
+    Replace only masked-out regions (where mask == False) with random noise.
+
+    The rest of the image (mask == True) is left unchanged.
+    Noise is sampled from a Gaussian distribution with standard deviation `sigma`.
+
+    Parameters
+    ----------
+    image : ArrayLike
+        Input image array or tensor (NumPy or PyTorch).
+    mask : ArrayLike
+        Boolean mask where True indicates preserved pixels, and False indicates masked-out regions.
+    sigma : float
+        Standard deviation of the Gaussian noise used for replacement.
+    framework : {"numpy", "torch"}
+        Backend to use for processing and noise generation.
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    Tuple[ArrayLike, ArrayLike]
+        - Output image with noise-filled masked regions.
+        - The input mask (possibly cast to the backend format).
     """
     mask = _ensure_bool_mask(mask, framework)
     noisy = apply_noise(image, sigma=sigma, framework=framework, seed=seed)
@@ -87,7 +141,28 @@ def _mode_masked_noised(
     seed: Optional[int] = None,
 ) -> Tuple[ArrayLike, ArrayLike]:
     """
-    Apply noise only within the masked-in region (mask == True); outside remains unchanged.
+    Apply Gaussian noise only within the masked-in region (where mask == True).
+
+    Pixels outside the mask (mask == False) are left unchanged.
+
+    Parameters
+    ----------
+    image : ArrayLike
+        Input image array or tensor (NumPy or PyTorch).
+    mask : ArrayLike
+        Boolean mask where True indicates pixels to be noised.
+    sigma : float
+        Standard deviation of the Gaussian noise to add.
+    framework : {"numpy", "torch"}
+        Backend used for array operations and noise generation.
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    Tuple[ArrayLike, ArrayLike]
+        - Output image with noise added to masked-in pixels.
+        - The input mask (possibly cast to the backend format).
     """
     mask = _ensure_bool_mask(mask, framework)
     if framework == "torch":
@@ -102,7 +177,6 @@ def _mode_masked_noised(
     return out, mask
 
 # ====[ Grid Masking + Noise ]====
-
 def _build_grid_mask_like(
     image: ArrayLike,
     framework: Framework,
@@ -110,8 +184,26 @@ def _build_grid_mask_like(
     step_w: int,
 ) -> ArrayLike:
     """
-    Build a boolean grid mask on the last two spatial dims (H, W).
-    True => keep; False => drop on grid lines.
+    Generate a boolean grid mask over the spatial dimensions (H, W) of the input.
+
+    Grid lines are marked as False (dropped), and all other pixels are marked as True (kept).
+    The mask has the same shape as the input image.
+
+    Parameters
+    ----------
+    image : ArrayLike
+        Input image array or tensor (NumPy or PyTorch).
+    framework : {"numpy", "torch"}
+        Backend used to create the mask.
+    step_h : int
+        Vertical step between horizontal grid lines.
+    step_w : int
+        Horizontal step between vertical grid lines.
+
+    Returns
+    -------
+    ArrayLike
+        Boolean mask of the same shape as the input image, with grid lines set to False.
     """
     if step_h < 1 or step_w < 1:
         raise ValueError("Grid steps must be >= 1.")
@@ -142,8 +234,28 @@ def _mode_grid_noised(
     seed: Optional[int] = None,
 ) -> Tuple[ArrayLike, ArrayLike]:
     """
-    Build a grid mask on (H,W) then apply noise to the retained region (mask==True) or, by policy here,
-    keep pixels on the False grid lines as 'holes' to be replaced by noise (like replace).
+    Apply noise based on a spatial grid mask.
+
+    A boolean grid mask is generated over the (H, W) dimensions.
+    Pixels on the grid lines (mask == False) are treated as missing and replaced by Gaussian noise.
+    Pixels off the grid (mask == True) are preserved.
+
+    Parameters
+    ----------
+    image : ArrayLike
+        Input image array or tensor (NumPy or PyTorch).
+    sigma : float
+        Standard deviation of the Gaussian noise.
+    framework : {"numpy", "torch"}
+        Backend to use for array operations and noise generation.
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    Tuple[ArrayLike, ArrayLike]
+        - Output image with grid-line pixels replaced by noise.
+        - The generated boolean grid mask.
     """
     # Steps proportional to sqrt of spatial dims, but never zero
     if framework == "torch":

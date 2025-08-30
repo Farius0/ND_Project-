@@ -26,14 +26,18 @@ Framework = Literal["numpy", "torch"]
 
 class PreprocessorND(OperatorCore):
     """
-    Modular ND image preprocessing with dual-backend (NumPy/Torch) and layout-aware steps.
+    Modular ND image preprocessing with dual-backend (NumPy/Torch) and layout-aware control.
+
+    Supports a chain of configurable steps such as normalization, clipping, stretching,
+    equalization, gamma correction, denoising, and artifact removal.
 
     Notes
     -----
-    - Steps are toggled via PreprocessorConfig flags (e.g., clip, stretch, equalize, ...).
-    - Execution order is defined by `self.pipeline` (name, function, priority) and can be updated.
+    - All steps are enabled/disabled via the `PreprocessorConfig` flags.
+    - Execution order is controlled by `self.pipeline`, which can be updated or reordered.
+    - Built on OperatorCore: preserves UID tagging, axis layout, and traceability.
+    - Compatible with both 2D and 3D images (and higher-D when meaningful).
     """
-
     def __init__(
         self,
         preprocess_cfg: PreprocessorConfig = PreprocessorConfig(),
@@ -42,18 +46,18 @@ class PreprocessorND(OperatorCore):
         global_cfg: GlobalConfig = GlobalConfig(),
     ) -> None:
         """
-        Initialize the preprocessing pipeline.
+        Initialize the ND-aware preprocessing pipeline.
 
         Parameters
         ----------
         preprocess_cfg : PreprocessorConfig
-            Preprocessing flags and parameters.
+            Flags and parameters defining which preprocessing steps to apply (e.g., clip, normalize, stretch).
         img_process_cfg : ImageProcessorConfig
-            Processor strategy and options.
+            Strategy for backend execution (vectorized, parallel, fallback, etc.).
         layout_cfg : LayoutConfig
-            Axis/layout configuration.
+            Axis configuration and layout tracking (e.g., channel_axis, depth_axis).
         global_cfg : GlobalConfig
-            Global behavior (framework, output_format, device, etc.).
+            General framework behavior, output format, device, and backend strategy.
         """
         # ====[ Configuration ]====
         self.layout_cfg: LayoutConfig = layout_cfg
@@ -149,16 +153,27 @@ class PreprocessorND(OperatorCore):
         
     def compose(self, image: ArrayLike) -> ArrayLike:
         """
-        Apply preprocessing pipeline sequentially using registered steps.
+        Apply the preprocessing pipeline sequentially to the input image.
+
+        Only the enabled steps (as defined by `PreprocessorConfig`) are applied,
+        and the order of execution is defined by `self.pipeline`, sorted by priority.
 
         Parameters
         ----------
-        image : np.ndarray | torch.Tensor
-            Input image.
+        image : np.ndarray or torch.Tensor
+            Input image to preprocess.
 
         Returns
         -------
-        Processed image.
+        ArrayLike
+            Preprocessed image after all enabled steps are applied.
+
+        Notes
+        -----
+        - Each step in the pipeline is a tuple: (step_name, function, priority).
+        - Steps are only executed if the corresponding flag (e.g., `self.clip`) is True.
+        - Verbose mode logs each step name and output stats (shape, dtype, min/max).
+        - Compatible with both NumPy and Torch tensors.
         """
         img = image
         
@@ -177,14 +192,25 @@ class PreprocessorND(OperatorCore):
     
     def set_priority(self, step_name: str, new_priority: int) -> None:
         """
-        Update the execution priority of a preprocessing step.
+        Update the execution priority of a preprocessing step in the pipeline.
 
         Parameters
         ----------
         step_name : str
-            Name of the step as defined in `self.pipeline`.
+            Name of the step to update (as registered in `self.pipeline`).
         new_priority : int
-            Lower values run earlier.
+            Execution priority. Lower values are executed earlier.
+
+        Raises
+        ------
+        ValueError
+            If the step name is not found in the pipeline.
+
+        Notes
+        -----
+        - After updating the priority, the pipeline is automatically re-sorted.
+        - Useful for customizing the order of preprocessing (e.g., normalize before clip).
+        - If `self.verbose` is enabled, logs the change to stdout.
         """
         for i, (name, func, _) in enumerate(self.pipeline):
             if name == step_name:
@@ -201,12 +227,22 @@ class PreprocessorND(OperatorCore):
     
     def save_pipeline(self, filepath: Union[str, Path]) -> None:
         """
-        Save the pipeline steps and their priorities to a JSON file.
+        Save the current preprocessing pipeline configuration to a JSON file.
+
+        Stores the list of enabled steps and their execution priorities,
+        allowing for later inspection or reuse.
 
         Parameters
         ----------
         filepath : str or Path
-            Path to the JSON file.
+            Destination path for the JSON file.
+
+        Notes
+        -----
+        - Only step names and priorities are saved (functions are not serialized).
+        - The output JSON file contains a list of {"step": ..., "priority": ...} entries.
+        - Enables reproducibility and transparency of preprocessing pipelines.
+        - Verbose mode prints the save confirmation with full path.
         """
         data = [
             {"step": name, "priority": priority}
@@ -221,12 +257,22 @@ class PreprocessorND(OperatorCore):
 
     def load_pipeline(self, filepath: Union[str, Path]) -> None:
         """
-        Load the pipeline step priorities from a JSON file.
+        Load and apply step priorities for the preprocessing pipeline from a JSON file.
+
+        Reads the file saved by `save_pipeline()` and updates the current pipeline order
+        accordingly. Missing steps fall back to low priority (default: 99).
 
         Parameters
         ----------
         filepath : str or Path
-            Path to the JSON file containing steps and priorities.
+            Path to the JSON file containing a list of {"step": ..., "priority": ...} entries.
+
+        Notes
+        -----
+        - Steps present in the file will override the current priorities.
+        - Steps missing from the file will be assigned fallback priority 99.
+        - The pipeline is automatically re-sorted after loading.
+        - Verbose mode prints confirmation and the loaded file path.
         """
         filepath = Path(filepath)
         with open(filepath, "r") as f:
@@ -248,17 +294,32 @@ class PreprocessorND(OperatorCore):
     # @log_exceptions(logger_name="error_logger")
     def __call__(self, image: Union[ArrayLike, str, Path]) -> ArrayLike:
         """
-        Run the preprocessing pipeline on an ND image or path.
+        Run the configured preprocessing pipeline on an ND image or image path.
+
+        Automatically detects the input type, applies layout-aware reading if needed,
+        and executes all enabled preprocessing steps in priority order.
 
         Parameters
         ----------
         image : ndarray | Tensor | str | Path
-            Either an already-loaded image or a path to an image.
+            Input image, either already loaded or specified by file path.
 
         Returns
         -------
         ndarray | Tensor
-            Processed image with proper tagging/output formatting.
+            Preprocessed image, tagged and formatted according to `GlobalConfig`.
+
+        Raises
+        ------
+        TypeError
+            If the input is not a supported type.
+
+        Notes
+        -----
+        - Paths are loaded using `ImageIO.read_image()` with configured layout/backend.
+        - All preprocessing steps are applied via `compose()`.
+        - Final output is passed through `to_output()` to apply tagging, UID, and output format.
+        - Compatible with both NumPy and Torch backends.
         """
         # === Detect image type ===
         if isinstance(image, (str, Path)):
@@ -276,13 +337,32 @@ class PreprocessorND(OperatorCore):
     
     def normalize_nd(self, image: ArrayLike) -> ArrayLike:
         """
-        Normalize values according to `normalize_mode` with optional clipping.
+        Normalize an ND image using the configured mode and optional clipping.
+
+        Supports multiple normalization strategies, applied element-wise across the image.
 
         Modes
         -----
         - 'minmax' : (x - min) / (max - min)
         - 'zscore' : (x - mean) / std
         - 'robust' : (x - Q1) / (Q3 - Q1)
+
+        Parameters
+        ----------
+        image : ndarray or torch.Tensor
+            Input image to normalize.
+
+        Returns
+        -------
+        ArrayLike
+            Normalized image in the same framework as input (NumPy or Torch).
+
+        Notes
+        -----
+        - Normalization mode is taken from `self.normalize_mode` (defined in `PreprocessorConfig`).
+        - Clipping to `self.clip_range` is applied if `self.clip` is True.
+        - Uses backend-specific implementation (`normalize_np` or `normalize_torch`).
+        - A small epsilon is added to denominators to prevent division by zero.
         """
         eps = 1e-8
         mode, clip_range = self.normalize_mode, self.clip_range
@@ -319,8 +399,28 @@ class PreprocessorND(OperatorCore):
     
     def stretch_contrast_nd(self, image: ArrayLike) -> ArrayLike:
         """
-        Stretch contrast using dynamic percentile rescaling.
-        ND-compatible via ImageProcessor.
+        Apply dynamic contrast stretching using percentile-based rescaling.
+
+        The input image is rescaled based on low and high percentiles,
+        then optionally clipped to a target output range.
+
+        Parameters
+        ----------
+        image : ndarray or torch.Tensor
+            Input image to stretch.
+
+        Returns
+        -------
+        ArrayLike
+            Contrast-stretched image in the same backend (NumPy or Torch).
+
+        Notes
+        -----
+        - The percentiles `p_low` and `p_high` (e.g., 1% and 99%) are used to define the input range.
+        - The output range is defined by `out_range` (default: [0, 1]).
+        - Clipping is applied to the output if `self.clip` is True.
+        - Uses NumPy backend even for Torch tensors to estimate percentiles safely.
+        - Internally sets the processor function via `self.processor`.
         """
         eps = 1e-8
         p_low = self.p_low
@@ -345,23 +445,39 @@ class PreprocessorND(OperatorCore):
     
     def aggregate_nd(self, image: ArrayLike) -> ArrayLike:
         """
-        Apply spatial averaging (mean or median) in ND images along a layout-aware axis.
-        Supports slicing in blocks of m along the specified axis.
-        
+        Apply block-wise spatial aggregation (mean or median) along a layout-aware axis.
+
+        Splits the image along a selected axis into non-overlapping blocks of fixed size,
+        applies a reduction (mean or median), and appends a final block if the division is not exact.
+
         Behavior
         --------
-        - Selects the target axis via `keys` ('axial','coronal','sagittal') or auto.
-        - Aggregates non-overlapping blocks of length `block_size` along that axis.
-        - Appends a residual aggregate if the length is not divisible by `block_size`.        
+        - Axis selection is guided by `self.keys`:
+            * 'axial', 'coronal', or 'sagittal' → mapped to known axes.
+            * 'auto' or None → uses the first available axis in (depth, height, width).
+        - Aggregation mode is defined in `self.agg_mode`: "mean" or "median".
+        - Block size is taken from `self.block_size` (default: 5).
 
         Parameters
         ----------
-        image : np.ndarray | torch.Tensor
-            ND image or batch.
+        image : np.ndarray or torch.Tensor
+            ND image or batch to aggregate.
 
         Returns
         -------
-        Averaged image (same type as input).
+        ArrayLike
+            Aggregated image, with the same type (NumPy or Torch) as input.
+
+        Raises
+        ------
+        ValueError
+            If the target axis cannot be inferred or if the mode is unsupported.
+
+        Notes
+        -----
+        - Handles both NumPy and Torch backends.
+        - The residual block (if any) is averaged and appended at the end.
+        - Maintains layout tracking if used inside `OperatorCore`-derived classes.
         """
         m = int(self.block_size)
         keys = self.keys
@@ -434,19 +550,29 @@ class PreprocessorND(OperatorCore):
     
     def gamma_correction_nd(self, image: ArrayLike) -> ArrayLike:
         """
-        Apply gamma correction to an ND image.
-        ND-compatible, layout-aware, via ImageProcessor.
-        
+        Apply gamma correction to an ND image using the configured gamma value.
+
+        Adjusts image brightness by applying a power-law transformation to values in [0, 1].
+
         Parameters
         ----------
         image : np.ndarray or torch.Tensor
-            Input image assumed normalized in [0, 1].
-        gamma : float
-            Gamma correction factor. >1 darkens, <1 brightens.
+            Input image, assumed to be normalized in the range [0, 1].
+        gamma : float (from self.gamma)
+            Gamma correction factor:
+            - gamma > 1 → darkens the image.
+            - gamma < 1 → brightens the image.
 
         Returns
         -------
-        Image after gamma correction (same type).
+        ArrayLike
+            Gamma-corrected image, with the same type as input (NumPy or Torch).
+
+        Notes
+        -----
+        - Input values are clipped to [0, 1] before applying the power transform.
+        - The `gamma` value is taken from `self.gamma` (set via `PreprocessorConfig`).
+        - Backend-specific function is assigned via `self.processor.function`.
         """
         def gamma_np(x: np.ndarray) -> np.ndarray:
             x = np.clip(x, 0.0, 1.0)
@@ -462,13 +588,30 @@ class PreprocessorND(OperatorCore):
 
     def equalize_hist_nd(self, image: ArrayLike, nbins: int = 256) -> ArrayLike:
         """
-        Histogram equalization (slice-wise) using skimage's equalize_hist.
+        Apply slice-wise histogram equalization to an ND image.
+
+        Uses `skimage.exposure.equalize_hist` on each slice independently
+        to enhance local contrast by redistributing pixel intensities.
+
+        Parameters
+        ----------
+        image : np.ndarray or torch.Tensor
+            Input image to equalize. Should be normalized to [0, 1] beforehand.
+        nbins : int, default 256
+            Number of bins used for histogram computation.
+
+        Returns
+        -------
+        ArrayLike
+            Equalized image with the same type as input (NumPy or Torch).
 
         Notes
         -----
-        - When running with Torch backend and `preprocess_fallback=True`, the
-          image is temporarily converted to NumPy for equalization, then we
-          restore the processor settings.
+        - The operation is performed slice-wise for ND images (e.g., over depth or batch).
+        - When using the Torch backend with `self.preprocess_fallback=True`, the image is
+        temporarily converted to NumPy for equalization, and the processor is restored after.
+        - The equalization is performed using `skimage.exposure.equalize_hist`.
+        - The processor function and framework are dynamically updated during execution.
         """
         def hist_eq_np(x: np.ndarray) -> np.ndarray:
             return equalize_hist(np.clip(x, 0, 1), nbins=nbins)
@@ -491,16 +634,29 @@ class PreprocessorND(OperatorCore):
         return result
 
     def remove_artifacts_2d(self, image: ArrayLike, framework: Optional[Framework] = None) -> ArrayLike:
-
         """
-        Artifact removal (2D-first) via ArtifactCleanerND with current layout.
+        Remove structural artifacts from a 2D or ND image using a layout-aware cleaner.
+
+        Delegates the operation to `ArtifactCleanerND`, which handles common artifacts
+        (e.g., stripes, edge bleed, acquisition noise) in 2D slices.
 
         Parameters
         ----------
-        image : ndarray | Tensor
-            Input image.
-        framework : str | None
-            Override backend ('numpy' or 'torch'). Defaults to current framework.
+        image : ndarray or torch.Tensor
+            Input image (2D, 3D, or batch of 2D slices).
+        framework : str or None, optional
+            Override for backend to use ('numpy' or 'torch'). If None, uses current framework.
+
+        Returns
+        -------
+        ArrayLike
+            Cleaned image with the same type as input (NumPy or Torch).
+
+        Notes
+        -----
+        - Uses `ArtifactCleanerND`, initialized with current layout and backend.
+        - Automatically layout-aware (e.g., works for (C, H, W) or (B, C, H, W) inputs).
+        - For ND images, cleaning is applied slice-wise (along appropriate axis).
         """
         fw = framework or self.framework        
         artifact_cleaner = ArtifactCleanerND(framework=fw,
@@ -510,7 +666,28 @@ class PreprocessorND(OperatorCore):
     
     def perona_enhancing(self, image: ArrayLike, framework: Optional[Framework] = None) -> ArrayLike:
         """
-        Edge-preserving enhancement using Perona-Malik variant.
+        Apply Perona–Malik edge-preserving enhancement to an image.
+
+        Enhances structures while preserving edges by anisotropic diffusion,
+        using a custom Perona-Malik variant adapted to the current layout.
+
+        Parameters
+        ----------
+        image : ndarray or torch.Tensor
+            Input image to enhance.
+        framework : str or None, optional
+            Backend to use ('numpy' or 'torch'). Defaults to current framework.
+
+        Returns
+        -------
+        ArrayLike
+            Enhanced image with preserved edges and reduced noise/artifacts.
+
+        Notes
+        -----
+        - Uses `PeronaEnhancer`, configured with current layout and backend.
+        - Supports 2D, 3D, and batched inputs depending on `PeronaEnhancer` capabilities.
+        - Layout handling ensures correct spatial axis selection and tagging.
         """
         fw = framework or self.framework
         perona = PeronaEnhancer(framework=fw,
@@ -521,14 +698,30 @@ class PreprocessorND(OperatorCore):
 
     def local_contrast_nd(self, image: ArrayLike, kernel_size: int = 3, eps: float = 1e-8) -> ArrayLike:
         """
-        Local contrast enhancement using mean and standard deviation.
+        Enhance local contrast by normalizing each pixel with its local mean and std.
+
+        For each pixel, computes a local window (mean and std), then rescales:
+            output = (x - mean_local) / (std_local + eps)
 
         Parameters
         ----------
+        image : np.ndarray or torch.Tensor
+            Input image to enhance.
         kernel_size : int, default 3
-            Window size for local mean.
+            Size of the local window used to compute mean and standard deviation.
         eps : float, default 1e-8
-            Stabilizer for division.
+            Small stabilizer to prevent division by zero.
+
+        Returns
+        -------
+        ArrayLike
+            Locally contrast-enhanced image, in the same framework as input.
+
+        Notes
+        -----
+        - Uses `feature_extractor()` to compute local mean and std in a layout-aware way.
+        - Compatible with 2D, 3D, and ND images using correct axis mapping.
+        - Backend (`numpy` or `torch`) and layout handling are automatically respected.
         """
         def contrast_np(x: np.ndarray) -> np.ndarray:
             mean_local = feature_extractor(x, features =["mean"], framework=self.framework, output_format="numpy", 
@@ -570,12 +763,59 @@ def preprocess(
     equalize: bool = False,
 ) -> ArrayLike:
     """
-    Convenience entrypoint to run the ND preprocessor with flags.
+    Run the full ND-aware preprocessing pipeline with selected options.
+
+    This is a convenience wrapper for instantiating and applying `PreprocessorND`
+    with layout-aware and dual-backend configurations.
+
+    Parameters
+    ----------
+    img : ArrayLike
+        Input image (NumPy array or Torch tensor).
+    processor_strategy : str, optional
+        Processing strategy. Defaults to "parallel" (NumPy) or "torch" (Torch).
+    framework : {'numpy', 'torch'}, default 'numpy'
+        Backend used internally for preprocessing.
+    output_format : {'numpy', 'torch'}, default 'numpy'
+        Desired format of the output.
+    layout_name : str, default 'HWC'
+        Layout description of the input (e.g., 'HWC', 'CHW', etc.).
+    layout_framework : {'numpy', 'torch'}, default 'numpy'
+        Layout backend used for resolving axis names.
+    layout_ensured_name : str, default 'HWC'
+        Target layout name to enforce on the processed output.
+
+    Flags (bool)
+    ------------
+    clip : bool
+        Clip values to [0, 1].
+    normalize : bool
+        Apply global normalization (min-max, z-score, or robust).
+    stretch : bool
+        Perform percentile-based contrast stretching.
+    denoise : bool
+        Apply basic denoising (if defined in pipeline).
+    aggregate : bool
+        Perform spatial aggregation (e.g., block-based averaging).
+    remove_artifacts : bool
+        Apply 2D artifact removal per slice.
+    local_contrast : bool
+        Enhance local contrast using sliding window normalization.
+    gamma_correct : bool
+        Apply gamma correction.
+    equalize : bool
+        Perform histogram equalization (slice-wise).
+
+    Returns
+    -------
+    ArrayLike
+        Preprocessed image, with layout tracking and proper formatting.
 
     Notes
     -----
-    - `processor_strategy` default: "parallel" for NumPy, "torch" for Torch,
-      unless explicitly provided.
+    - The order of execution is determined by internal pipeline priorities.
+    - Uses `PreprocessorND`, configured dynamically from the provided flags.
+    - All layout and framework behavior is handled via `LayoutConfig` and `GlobalConfig`.
     """
     
     # ====[ Fallback ]====
