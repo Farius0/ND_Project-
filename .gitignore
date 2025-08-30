@@ -1,0 +1,124 @@
+# ===============================
+# Python cache & compiled
+# ===============================
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+
+# ===============================
+# Jupyter
+# ===============================
+.ipynb_checkpoints/
+.jupyter/lab/workspaces/
+
+# ===============================
+# Virtual environments
+# ===============================
+.venv/
+venv/
+env/
+env*/
+.conda/
+.mamba/
+
+# ===============================
+# Build & packaging
+# ===============================
+*.egg-info/
+.eggs/
+dist/
+build/
+wheels/
+pip-wheel-metadata/
+__pypackages__/
+
+# ===============================
+# IDE / Editors
+# ===============================
+.vscode/
+.idea/
+.ropeproject/
+.spyproject/
+.history
+*.swp
+*.swo
+*.orig
+
+# ===============================
+# OS-specific
+# ===============================
+.DS_Store
+Thumbs.db
+Icon?
+
+# ===============================
+# Project-specific (local data)
+# ===============================
+07_SRC/tests/experiments/test_3D_image.py
+07_SRC/results/
+07_SRC/logs/
+07_SRC/scripts/
+
+# ===============================
+# ML / DL large files
+# ===============================
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.h5
+*.joblib
+*.pkl
+
+# ===============================
+# Arrays / Scientific data
+# ===============================
+*.npy
+*.npz
+*.mat
+*.hdf5
+*.h5
+
+# ===============================
+# Images / Volumes / Medical
+# ===============================
+# *.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.bmp
+*.nii
+*.nii.gz
+*.mha
+*.mhd
+*.dcm
+*.raw
+
+# ===============================
+# Archives / dumps
+# ===============================
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+*.xz
+
+# ===============================
+# Secrets & env
+# ===============================
+.env
+.env.*
+*.env
+*.secret
+secrets/
+*.key
+*.pem
+
+# ===============================
+# Keep placeholders
+# ===============================
+!.gitkeep
+
