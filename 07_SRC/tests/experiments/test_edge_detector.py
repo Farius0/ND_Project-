@@ -32,8 +32,8 @@ def make_runner(edge_strategy,
 
 if __name__ == "__main__":
     
-    root = Path.cwd().parent.parent.parent / "03_EXAMPLES_DATA" / "Images"
-    images_path = [str(p) for p in root.rglob("*.png")]
+    cwd = Path.cwd().parent.parent.parent / "03_EXAMPLES_DATA" / "Images"
+    images_path = [str(p) for p in cwd.rglob("*.png")]
     rand = random.randint(0, len(images_path) - 1)
 
     layout_cfg = LayoutConfig(

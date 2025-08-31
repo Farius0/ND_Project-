@@ -126,6 +126,10 @@ class ImageIO(OperatorCore):
             )
         except Exception:
             # fallback if missing
+            if self.verbose:
+                print(
+                    f"Layout {self.layout_ensured_name} not found, using default {default_layout}."
+                )
             self.layout_ensured_name = default_layout
             self.layout_ensured = get_layout_axes(self.framework, default_layout)
 

@@ -32,12 +32,13 @@ def make_runner(features,
                                 output_format=output_format,
                                 layout_name='HWC',
                                 layout_framework='numpy', 
+                                combine_features=True
                                 )
     return _runner
 
 if __name__ == "__main__":
 
-    root = Path.cwd().parent.parent / "03_EXAMPLES_DATA" / "Images"
+    root = Path.cwd().parent.parent.parent / "03_EXAMPLES_DATA" / "Images"
     images_path = sorted([str(p) for p in root.rglob("*.png")])
     rand = random.randint(0, len(images_path) - 2)
     
@@ -60,61 +61,63 @@ if __name__ == "__main__":
     image = io.read_image(images_path[rand], framework="numpy")  
 
     features  = ["gaussian_eigen",]
+    
+    # features = [["intensity", "mean", "std", "median", "kurtosis", "skewness"]]
 
-    vectorized_ = make_runner(features,"vectorized", "vectorized", "gaussian")
+    vectorized_ = make_runner(features, "vectorized", "vectorized", "gaussian")
     classic_ = make_runner(features, "classic", "classic", "gaussian")
     torch_ = make_runner(features, "torch", "torch", "torch", input_format="torch")
     parallel_ = make_runner(features, "parallel", "parallel", "gaussian")
 
     vectorized_res, vectorized_time=vectorized_(image)
-    classic_res, classic_time=classic_(image)
+    # classic_res, classic_time=classic_(image)
     torch_res, torch_time=torch_(image)
-    parallel_res, parallel_time=parallel_(image)
+    # parallel_res, parallel_time=parallel_(image)
 
-    _, ((a,b), (c,d)) = plt.subplots(2, 2, figsize=(12, 8))
+    # _, ((a,b), (c,d)) = plt.subplots(2, 2, figsize=(12, 8))
 
-    # Visualize features
-    c_idx=0
-    f_idx=0
-    cmap="auto" # "seismic", "jet", "Blues", "Reds", "inferno", "gray", "flag", "coolwarm", "plasma", "Greys_r"
-    colorbar = False
+    # # Visualize features
+    # c_idx=0
+    # f_idx=0
+    # cmap="auto" # "seismic", "jet", "Blues", "Reds", "inferno", "gray", "flag", "coolwarm", "plasma", "Greys_r"
+    # colorbar = False
 
-    show_plane(a, 
-            vectorized_res, 
-            title=f"{features}_vectorized_{vectorized_time:.2f}s", 
-            cmap=cmap,
-            channel_index=c_idx,
-            feature_index=f_idx,
-            norm = False,
-            colorbar=colorbar,
-            feature_type=features[0])
-    show_plane(b, 
-            classic_res, 
-            title=f"{features}_classic_{classic_time:.2f}s", 
-            cmap=cmap,
-            channel_index=c_idx,
-            feature_index=f_idx,
-            norm = False,
-            colorbar=colorbar,
-            feature_type=features[0])
-    show_plane(c, 
-            torch_res, 
-            title=f"{features}_torch_{torch_time:.2f}s", 
-            cmap=cmap,
-            channel_index=c_idx,
-            feature_index=f_idx,
-            norm = False,
-            colorbar=colorbar,
-            feature_type=features[0])
-    show_plane(d, 
-            parallel_res, 
-            title=f"{features}_parallel_{parallel_time:.2f}s", 
-            cmap=cmap,
-            channel_index=c_idx,
-            feature_index=f_idx,
-            norm = False,
-            colorbar=colorbar,
-            feature_type=features[0])
+    # show_plane(a, 
+    #         vectorized_res, 
+    #         title=f"{features}_vectorized_{vectorized_time:.2f}s", 
+    #         cmap=cmap,
+    #         channel_index=c_idx,
+    #         feature_index=f_idx,
+    #         norm = False,
+    #         colorbar=colorbar,
+    #         feature_type=features[0])
+    # show_plane(b, 
+    #         classic_res, 
+    #         title=f"{features}_classic_{classic_time:.2f}s", 
+    #         cmap=cmap,
+    #         channel_index=c_idx,
+    #         feature_index=f_idx,
+    #         norm = False,
+    #         colorbar=colorbar,
+    #         feature_type=features[0])
+    # show_plane(c, 
+    #         torch_res, 
+    #         title=f"{features}_torch_{torch_time:.2f}s", 
+    #         cmap=cmap,
+    #         channel_index=c_idx,
+    #         feature_index=f_idx,
+    #         norm = False,
+    #         colorbar=colorbar,
+    #         feature_type=features[0])
+    # show_plane(d, 
+    #         parallel_res, 
+    #         title=f"{features}_parallel_{parallel_time:.2f}s", 
+    #         cmap=cmap,
+    #         channel_index=c_idx,
+    #         feature_index=f_idx,
+    #         norm = False,
+    #         colorbar=colorbar,
+    #         feature_type=features[0])
 
     # Visualize histogram
     # i = 2

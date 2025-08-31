@@ -249,7 +249,7 @@ class SegmenterND(OperatorCore):
             "hdbscan": self.threshold_hdbscan_nd,
             "region_growing": self.region_growing_nd,
             "split_and_merge": self.split_and_merge_nd,
-            "watershed": self.segment_watershed_nd,
+            # "watershed": self.segment_watershed_nd,
         }
 
         if self.mode not in strategy_map:
@@ -355,7 +355,7 @@ class SegmenterND(OperatorCore):
         - Backend-specific logic is dispatched via `self.processor`.
         """
         epsilon = self.epsilon
-        max_iter = self.max_iter
+        max_iter = self.max_iter or 500
         
         def thresh_np(x: np.ndarray) -> np.ndarray:
             s_old = np.mean(x)
@@ -1766,10 +1766,10 @@ def get_nd_neighbors(ndim: int, connectivity: str = "full") -> np.ndarray:
 
 def segmenter_nd(
     img: ArrayLike,
-    segmenter_mode: Optional[str] = None,
-    threshold: Optional[float] = None,
-    multi_thresholds: Optional[List[float]] = None,
-    num_classes: Optional[int] = None,
+    segmenter_mode: Optional[str] = "otsu",
+    threshold: Optional[float] = 0.5,
+    multi_thresholds: Optional[Sequence[float]] = (0.33, 0.66),
+    num_classes: Optional[int] = 2,
     framework: Framework = "numpy",
     output_format: Framework = "numpy",
     layout_name: str = "HWC",

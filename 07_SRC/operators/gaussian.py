@@ -387,9 +387,10 @@ class NDConvolver(OperatorCore):
         
         try:
             result = self.processor(image)
-            # update processor
-            self.processor.strategy = "torch"
-            self.processor.framework = "torch"
+            if self.strategy == "torch" and use_fallback:
+                # update processor
+                self.processor.strategy = "torch"
+                self.processor.framework = "torch"
             return result
         except Exception as e:
             raise RuntimeError(f"[NDConvolver] Convolution failed using strategy '{self.strategy}'") from e
@@ -991,7 +992,7 @@ def conv(
     processor_strategy=processor_strategy or "vectorized" if framework == "numpy" else "torch"   
         
     # ====[ Configuration ]====
-    conv_params: Dict[str, Any] = {"conv_strategy": conv_strategy, "sigma": sigma, "grouped": False}
+    conv_params: Dict[str, Any] = {"conv_strategy": conv_strategy, "sigma": sigma, "grouped": True}
     proc_params: Dict[str, Any] = {"processor_strategy": processor_strategy,}
     layout_kernel_params: Dict[str, Any] = {"layout_name": "HW" if dim == 2 else "DHW", 
                             "layout_framework": framework}

@@ -20,7 +20,7 @@ def make_runner(strategy,
     def _runner(img=image, 
                 dim=dim, 
                 size=None,
-                sigma=21.0, 
+                sigma=2.0, 
                 angle=0):
         return conv(img, 
                     dim, 

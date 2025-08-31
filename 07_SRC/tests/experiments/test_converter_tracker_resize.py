@@ -12,6 +12,7 @@ from operators.image_io import ImageIO
 from operators.axis_tracker import AxisTracker
 
 # ====[ Define image directory ]====
+# root = Path(__file__).parent.parent.parent / "03_EXAMPLES_DATA" / "Images"
 root = Path.cwd().parent.parent.parent / "03_EXAMPLES_DATA" / "Images"
 images_path = sorted([str(p) for p in root.rglob("*.png")])
 rand = random.randint(0, len(images_path) - 2)

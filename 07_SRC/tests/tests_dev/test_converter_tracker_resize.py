@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Tuple
 
 import numpy as np
 import pytest
@@ -18,24 +17,32 @@ except Exception:
     TORCH_AVAILABLE = False
     CUDA_AVAILABLE = False
 
-# Project imports (architecture remains unchanged)
 from core.config import LayoutConfig, GlobalConfig
 from operators.image_io import ImageIO
-from utils.axis_tracker import AxisTracker
+from operators.axis_tracker import AxisTracker
 
+# ---------- helpers ----------
+def _maybe_image_paths():
+    roots = [
+        Path.cwd() / "03_EXAMPLES_DATA" / "Images",
+        Path.cwd().parent / "03_EXAMPLES_DATA" / "Images",
+        Path.cwd().parent.parent / "03_EXAMPLES_DATA" / "Images",
+        Path.cwd().parent.parent.parent / "03_EXAMPLES_DATA" / "Images",
+    ]
+    for r in roots:
+        if r.exists():
+            imgs = sorted([str(p) for p in r.rglob("*.png")])
+            if len(imgs) >= 1:
+                return imgs
+    return []
 
-# ===================
-# Helpers
-# ===================
-
-def _make_np(shape: Tuple[int, ...], seed: int = 123) -> np.ndarray:
-    """
-    Create a deterministic NumPy array with random values.
-    A fixed seed ensures test reproducibility across runs.
-    """
+def _synthetic_hwc(h=64, w=96, c=3, seed=0):
     rng = np.random.default_rng(seed)
-    return rng.standard_normal(size=shape).astype("float32")
-
+    x = rng.standard_normal((h, w, c)).astype("float32")
+    x = (x
+         + np.roll(x, 1, 0) + np.roll(x, -1, 0)
+         + np.roll(x, 1, 1) + np.roll(x, -1, 1)) / 5.0
+    return x
 
 def device_matches(dev) -> bool:
     """
@@ -47,205 +54,125 @@ def device_matches(dev) -> bool:
         return True
     return s == "cpu"
 
-
-# ===================
-# Fixtures
-# ===================
-
-@pytest.fixture(scope="session")
-def images_root() -> Path:
-    """
-    Locate an images directory containing PNG files.
-    Tests that require data will skip if none is found.
-    """
-    candidates = [
-        Path.cwd() / "03_EXAMPLES_DATA" / "Images",
-        Path.cwd().parent / "03_EXAMPLES_DATA" / "Images",
-        Path.cwd().parent.parent / "03_EXAMPLES_DATA" / "Images",
-        Path.cwd().parent.parent.parent / "03_EXAMPLES_DATA" / "Images",
-    ]
-    for p in candidates:
-        if p.exists() and any(p.rglob("*.png")):
-            return p
-    return candidates[0]
-
-
-@pytest.fixture(scope="session")
-def image_paths(images_root: Path) -> List[Path]:
-    """
-    Return all PNG image paths under images_root, sorted.
-    """
-    return sorted(images_root.rglob("*.png")) if images_root.exists() else []
-
-
-@pytest.fixture(scope="session")
-def layout_cfg() -> LayoutConfig:
-    """
-    Input contract: source images are NumPy in HWC/NHWC.
-    We do not enforce any layout in tests; we only read/observe tags.
-    """
-    return LayoutConfig(
-        layout_name="HWC",
-        layout_framework="numpy",
-        layout_ensured_name="NCHW",  # not enforced here; only referenced by the project
-    )
-
-
-@pytest.fixture(scope="session")
-def global_cfg() -> GlobalConfig:
-    """
-    Internal work in torch, output in numpy, batch dim added by default.
-    """
-    return GlobalConfig(
-        framework="torch",
-        output_format="numpy",
-        add_batch_dim=True,
-    )
-
-
-@pytest.fixture(scope="session")
-def io(layout_cfg: LayoutConfig, global_cfg: GlobalConfig) -> ImageIO:
-    """
-    Instantiate ImageIO with provided configs.
-    """
+# ---------- fixtures ----------
+@pytest.fixture(scope="module")
+def io_torch():
+    layout_cfg = LayoutConfig(layout_name="HWC", layout_framework="numpy", layout_ensured_name="NCHW")
+    global_cfg = GlobalConfig(framework="torch", output_format="numpy", add_batch_dim=True)
     return ImageIO(layout_cfg=layout_cfg, global_cfg=global_cfg)
 
-
-# ===================
-# Tests (NumPy input only — first tag defines the contract)
-# ===================
-
+# ---------- tests ----------
 @pytest.mark.parametrize("require_data", [True, False])
-def test_read_two_images_and_tagging(io: ImageIO, image_paths: List[Path], require_data: bool):
-    """
-    Input is always NumPy (input contract). ImageIO performs the first tag (contract) and internal conversion.
-    Verifies:
-      - tags exist and contain distinct UIDs,
-      - conversion to numpy output is stable and shape is sensible.
-    """
-    if require_data and len(image_paths) < 2:
+def test_read_two_images_and_tagging(io_torch: ImageIO, require_data: bool):    
+    imgs = _maybe_image_paths()
+    if require_data and len(imgs) < 2:
         pytest.skip("No image data on disk; skipping data-dependent test.")
 
     if require_data:
-        # Paths accepted; ImageIO still performs the first tagging/contract.
-        img1 = io.read_image(str(image_paths[0]), framework="torch", enable_uid=True)
-        img2 = io.read_image(str(image_paths[1]), framework="torch", enable_uid=True)
+        img1 = io_torch.read_image(imgs[0], framework="torch", enable_uid=True)
+        img2 = io_torch.read_image(imgs[1], framework="torch", enable_uid=True)
     else:
-        # Pure NumPy inputs (HWC), deterministic via seeds.
-        img1_np = _make_np((32, 32, 3), seed=1)
-        img2_np = _make_np((48, 24, 3), seed=2)
-        img1 = io.read_image(img1_np, framework="torch", enable_uid=True)
-        img2 = io.read_image(img2_np, framework="torch", enable_uid=True)
+        img1_np = _synthetic_hwc(seed=1)
+        img2_np = _synthetic_hwc(seed=2)
+        img1 = io_torch.read_image(img1_np, framework="torch", enable_uid=True)
+        img2 = io_torch.read_image(img2_np, framework="torch", enable_uid=True)
 
-    assert io.has_tag(img1, "torch")
-    assert io.has_tag(img2, "torch")
+    assert io_torch.has_tag(img1, "torch")
+    assert io_torch.has_tag(img2, "torch")
 
-    tag1 = io.track(img1).get_tag()
-    tag2 = io.track(img2).get_tag()
+    tag1 = io_torch.track(img1).get_tag()
+    tag2 = io_torch.track(img2).get_tag()
     assert tag1 and tag2
 
     uid1 = tag1.get("uid")
     uid2 = tag2.get("uid")
     assert uid1 and uid2 and uid1 != uid2
 
-    out1 = io.to_output(img1, framework="numpy", tag_as="output")
-    out2 = io.to_output(img2, framework="numpy", tag_as="output")
+    out1 = io_torch.to_output(img1, framework="numpy", tag_as="output")
+    out2 = io_torch.to_output(img2, framework="numpy", tag_as="output")
+    assert io_torch.has_tag(out1, "numpy")
+    assert io_torch.has_tag(out2, "numpy")
     assert isinstance(out1, np.ndarray) and isinstance(out2, np.ndarray)
     assert out1.ndim in (2, 3) and out2.ndim in (2, 3)
 
 
 @pytest.mark.parametrize("require_data", [True, False])
-def test_axis_tracker_moveaxis_contract_respected(io: ImageIO, image_paths: List[Path], require_data: bool):
-    """
-    Validate that AxisTracker.moveaxis preserves tag readability and identity (UID).
-    No layout/axes policy is enforced by this test; it only observes behavior.
-    """
-    if require_data and not image_paths:
+def test_axis_tracker_moveaxis_contract_respected(io_torch: ImageIO, require_data: bool):
+    imgs = _maybe_image_paths()
+    if require_data and imgs is None:
         pytest.skip("No image data available.")
 
     if require_data:
-        img = io.read_image(str(image_paths[0]), framework="torch", enable_uid=True)
+        img = io_torch.read_image(imgs[0], framework="torch", enable_uid=True)
     else:
-        img_np = _make_np((32, 32, 3), seed=3)  # NumPy input
-        img = io.read_image(img_np, framework="torch", enable_uid=True)
+        img_np = _synthetic_hwc(seed=1)  # NumPy input
+        img = io_torch.read_image(img_np, framework="torch", enable_uid=True)
 
-    tr = AxisTracker(img, operator=io, framework="torch")
+    tr = AxisTracker(img, operator=io_torch, framework="torch")
     tag_before = tr.get_tag().copy()
     orig_shape = tuple(tr.image.shape)
 
-    # Example move: (C,H,W) -> (H,W,C) or any valid permutation depending on current shape.
     tr2 = tr.moveaxis(src=0, dst=-1)
     tag_after = tr2.get_tag()
 
     assert tag_after is not None
-    # Identity must remain the same
-    assert tag_before.get("uid") == tag_after.get("uid")
-    # Shape changed by permutation but retains the same factors
+    assert tag_before.get("uid") == tag_after.get("uid") # Identity must remain the same
     assert tr2.image.shape != orig_shape
     assert sorted(tr2.image.shape) == sorted(orig_shape)
 
 
 @pytest.mark.parametrize("stack", [True, False])
 @pytest.mark.parametrize("require_data", [True, False])
-def test_load_batch_match_to_first(io: ImageIO, image_paths: List[Path], stack: bool, require_data: bool):
-    """
-    The first element defines the reference when match_to='first'.
-    Inputs are NumPy arrays or paths; the operator handles conversion/resize internally.
-    """
-    if require_data and len(image_paths) < 2:
+def test_load_batch_match_to_first(io_torch: ImageIO,stack: bool, require_data: bool):
+    imgs = _maybe_image_paths()
+    if require_data and len(imgs) < 2:
         pytest.skip("No image data available for batch tests.")
 
     if require_data:
-        paths = [str(p) for p in image_paths[:2]]
-        batch = io.load_batch(paths, to="torch", match_to="first", stack=stack)
+        paths = [str(p) for p in imgs[:2]]
+        batch = io_torch.load_batch(paths, to="torch", match_to="first", stack=stack)
     else:
-        first_np  = _make_np((64, 48, 3), seed=4)  # reference
-        second_np = _make_np((32, 32, 3), seed=5)
-        batch = io.load_batch([first_np, second_np], to="torch", match_to="first", stack=stack)
+        first_np  = _synthetic_hwc(seed=4)  # reference
+        second_np = _synthetic_hwc(seed=5)
+        batch = io_torch.load_batch([first_np, second_np], to="torch", match_to="first", stack=stack)
 
     if stack:
         # Expect a batched tensor/array (e.g., (N,C,H,W)); we do not enforce exact layout here.
         assert hasattr(batch, "shape") and len(batch.shape) >= 4
         spatial = batch.shape[-2:]
-        # Basic sanity: positive spatial dims
-        assert spatial[0] > 0 and spatial[1] > 0
+        assert spatial[0] > 0 and spatial[1] > 0 # Basic sanity: positive spatial dims
     else:
         assert isinstance(batch, list) and len(batch) == 2
         s0, s1 = batch[0].shape, batch[1].shape
         assert s0 == s1
-
+        
 
 @pytest.mark.parametrize("use_cuda", [False, True])
-def test_device_preservation(io: ImageIO, use_cuda: bool):
-    """
-    Validate torch->torch path preserves dtype/shape and uses a valid device.
-    Device comparison is tolerant: 'cuda' and 'cuda:0' are both accepted as CUDA.
-    """
+def test_device_preservation(io_torch: ImageIO,use_cuda: bool):
     if use_cuda and not (TORCH_AVAILABLE and CUDA_AVAILABLE):
         pytest.skip("CUDA not available.")
 
-    x_np = _make_np((3, 32, 32), seed=6)  # NumPy input
-    timg = io.read_image(x_np, framework="torch", enable_uid=True)
+    x_np = _synthetic_hwc(seed=7)  # NumPy input
+    timg = io_torch.read_image(x_np, framework="torch", enable_uid=True)
 
     if TORCH_AVAILABLE:
         if use_cuda:
             timg = timg.to("cuda")
-        tout = io.to_output(timg, framework="torch", tag_as="output")
+        tout = io_torch.to_output(timg, framework="torch", tag_as="output")
         assert device_matches(tout.device)
         assert tout.dtype == timg.dtype
         assert tout.shape == timg.shape
 
 
-def test_summary_and_tag_summary_do_not_raise(io: ImageIO):
-    """
-    Sanity check: summary() and AxisTracker.tag_summary() must not raise.
-    No windows should be opened (tests are non-interactive).
-    """
-    x_np = _make_np((32, 32, 3), seed=7)
-    timg = io.read_image(x_np, framework="torch", enable_uid=True)
+def test_summary_and_tag_summary_do_not_raise(io_torch: ImageIO):
+    imgs = _maybe_image_paths()
+    if imgs:
+        timg = io_torch.read_image(imgs[0], framework="torch", enable_uid=True)
+    else:
+        timg = io_torch.read_image(_synthetic_hwc(seed=2), framework="torch", enable_uid=True)
 
-    tr = AxisTracker(timg, operator=io, framework="torch")
+    tr = AxisTracker(timg, operator=io_torch, framework="torch")
     tr.tag_summary()  # must not raise
 
-    out = io.to_output(timg, framework="numpy", tag_as="output")
-    io.summary(out, framework="numpy")  # must not raise
+    out = io_torch.to_output(timg, framework="numpy", tag_as="output")
+    io_torch.summary(out, framework="numpy")  # must not raise

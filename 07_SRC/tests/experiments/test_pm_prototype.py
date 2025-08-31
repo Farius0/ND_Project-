@@ -5,10 +5,8 @@ from scipy.ndimage import convolve1d
 from skimage.filters import threshold_otsu
 from pathlib import Path
 
-import sys
-sys.path.append(str(Path.cwd().parent))
 from utils.decorators import TimerManager
-from utils.image_io import ImageIO
+from operators.image_io import ImageIO
 from utils.nd_tools import show_plane
 
 from core.config import (LayoutConfig, GlobalConfig,)
@@ -1235,7 +1233,6 @@ from PIL import Image
 
 import matplotlib.pyplot as plt
 
-# cwd = Path.cwd().parent.parent.parent / "Bureau" /"STAGE FARIUS" /"Images" # B
 cwd = Path.cwd().parent.parent / "Images" # H
 
 images_path = []

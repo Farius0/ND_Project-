@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, Union, Any
+from typing import Callable, Dict, List, Optional, Tuple, Union, Any, Sequence
 
 import random
 
@@ -671,7 +671,7 @@ class SegmenterConfig:
     mode: str = "otsu"
     bins: int = 256
     threshold: float = 0.5
-    multi_thresholds: tuple = (0.33, 0.66)
+    multi_thresholds: Optional[Sequence[float]] = (0.33, 0.66)
     seeds: Optional[Union[List[int], int]] = None
     n_seeds: int = 3
     window_size: int = 11

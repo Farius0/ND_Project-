@@ -875,10 +875,11 @@ class FeatureExtractorND(OperatorCore):
                              sigma=self.sigma,
                              size=self.window_size,)
         
-        # Restore parameters
-        self.convolve.strategy = "torch"
-        self.convolve.framework, self.convolve.output_format = "torch", "torch"
-        self.convolve.processor.framework, self.convolve.processor.output_format = "torch", "torch"
+        if is_torch:
+            # Restore parameters
+            self.convolve.strategy = "torch"
+            self.convolve.framework, self.convolve.output_format = "torch", "torch"
+            self.convolve.processor.framework, self.convolve.processor.output_format = "torch", "torch"
         
         return self.to_output(result, framework=out)
     
@@ -2180,7 +2181,6 @@ class FeatureExtractorND(OperatorCore):
                     theta=theta,
                     sigma=sigma,
                     framework=framework,
-                    device=device
                 )
 
                 # Apply convolution
@@ -3020,7 +3020,7 @@ class FeatureExtractorND(OperatorCore):
             cov = torch.einsum('nij,nik->njk', centered, centered) / (patch_size - 1 + eps) if framework == "torch" \
                 else np.einsum('nij,nik->njk', centered, centered) / (patch_size - 1 + eps)
 
-            eigvals, eigvecs = torch.linalg.eigh(cov) if framework == "torch" else np.linalg.eigh(cov)
+            eigvals, eigvecs = torch.linalg.eigh(cov) if framework == "torch" else np.linalg.eigh(cov) # torch error
 
             if reduction == "first_pc":
                 pc1 = eigvecs[..., -1]
@@ -3055,7 +3055,7 @@ class FeatureExtractorND(OperatorCore):
             else:
                 raise ValueError(f"[local_pca_nd] Unknown reduction mode '{reduction}'")
 
-        # === Reconstruire la sortie ===
+        # === Output reconstruction ===
         tracker = self.track(image)
         spatial = list(spatial_shape)
 
@@ -3069,7 +3069,7 @@ class FeatureExtractorND(OperatorCore):
             output = output.view(*spatial, -1) if framework == "torch" else output.reshape(*spatial, -1)
 
         if reduction == "first_pc":
-            output = output.squeeze(-1)
+            output = output.squeeze(-1) if output.shape[-1] == 1 else output
 
         return self.to_output(tracker.copy_to(output).get())
 
