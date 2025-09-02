@@ -604,6 +604,7 @@ class AxisTracker:
 
         layout_str = "".join([ax for ax in layout_name if ax not in remove_axes])
         axes = get_layout_axes(framework, layout_str)
+        axes_layout = dict(axes)
         axes.pop("name", None)
         axes.pop("description", None)
 
@@ -611,6 +612,7 @@ class AxisTracker:
         tracker.update_tags(axes)
         tracker.update_tag("shape_after", sliced_img.shape)
         tracker.update_tag("status", "split")
+        tracker.update_tag("layout", axes_layout)
         tracker.update_tag("layout_name", layout_str)
 
         return tracker.get()

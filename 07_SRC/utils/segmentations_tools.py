@@ -602,22 +602,37 @@ def estimate_thickness_from_all_points(
         - Local thickness profile as a dictionary: {column_index: thickness_value}
         - Global metrics as a dictionary: {metric_name: value}
     """
-
-
-    valid_contours = [c for c in contours if isinstance(c, np.ndarray) and c.ndim == 2 and c.shape[1] >= 2 and len(c) >= min_length]
+    # --- Validate input
+    valid_contours = [
+        c for c in contours
+        if isinstance(c, np.ndarray) and c.ndim == 2 and c.shape[1] >= 2 and len(c) >= min_length
+    ]
     if not valid_contours:
-        return {0: default_value}, {}
+        thickness_map: Dict[int, float] = {0: float(default_value)}
+        summary: Dict[str, float] = {
+            "mean": np.nan, "median": np.nan, "std": np.nan, "min": np.nan, "max": np.nan
+        }
+        if shape_length is not None and shape_length > 0:
+            summary["percent"] = 0.0
+        if metrics:
+            for k in metrics:
+                summary.setdefault(k, np.nan)
+        return thickness_map, summary
 
+    # --- Stack points and sort by column (x index)
     points = np.concatenate(valid_contours, axis=0)
-    rows = points[:, 0]
-    cols = points[:, 1].astype(int)
+    rows = points[:, 0]  # vertical coordinate (y)
+    cols = points[:, 1].astype(int)  # horizontal/column index
 
     order = np.argsort(cols)
     cols_sorted = cols[order]
     rows_sorted = rows[order]
 
-    unique_cols, start_idx, counts = np.unique(cols_sorted, return_index=True, return_counts=True)
+    unique_cols, start_idx, counts = np.unique(
+        cols_sorted, return_index=True, return_counts=True
+    )
 
+    # --- Build raw per-column thickness (max-min) with guards
     thickness_raw: Dict[int, float] = {}
     for col, start, count in zip(unique_cols, start_idx, counts):
         if count < min_points_per_column:
@@ -627,29 +642,47 @@ def estimate_thickness_from_all_points(
         if d >= min_distance:
             thickness_raw[int(col)] = d
 
-    # optional smoothing
-    if smooth and len(thickness_raw) >= kernel_size:
-        k = max(1, int(kernel_size))
-        kk = k if k % 2 == 1 else k + 1  # odd window
+    # --- Optional smoothing
+    if smooth and len(thickness_raw) >= kernel_size and uniform_filter1d is not None:
+        k = int(kernel_size)
+        if k < 1:
+            k = 1
+        if k % 2 == 0:
+            k += 1  # enforce odd window
         keys_sorted = sorted(thickness_raw)
         vals = np.array([thickness_raw[kc] for kc in keys_sorted], dtype=float)
-        vals_s = uniform_filter1d(vals, size=kk, mode="nearest")
+        vals_s = uniform_filter1d(vals, size=k, mode="nearest")
         thickness_map = dict(zip(keys_sorted, map(float, vals_s)))
     else:
         thickness_map = thickness_raw
 
-    if not thickness_map:
-        thickness_map = {0: default_value}
-        summary = {key: float('nan') for key in (metrics or {
-            "mean", "median", "std", "min", "max", "count", "percent"
-        })}
-        return thickness_map, summary, {}
-    
-    if use_robust_filter:
+    # --- Robust filter (may remove all values)
+    if use_robust_filter and thickness_map:
         params = robust_filter_params or {}
         thickness_map = filter_outliers_robust(thickness_map, **params)
 
+    # --- Prepare values array
     values = np.array(list(thickness_map.values()), dtype=float)
+
+    if values.size == 0:
+        thickness_map = {0: float(default_value)}
+        summary = {
+            "mean": np.nan, "median": np.nan, "std": np.nan, "min": np.nan, "max": np.nan
+        }
+        if shape_length is not None and shape_length > 0:
+            summary["percent"] = 0.0
+        if metrics:
+            for k in metrics:
+                summary.setdefault(k, np.nan)
+        return thickness_map, summary
+
+    # --- Build metric set (defaults + user-provided), using safe reducers
+    def _safe(func: Callable[[ArrayNP], float], arr: ArrayNP) -> float:
+        try:
+            return float(func(arr))
+        except Exception:
+            return float("nan")
+
     default_metrics: Dict[str, Callable[[ArrayNP], float]] = {
         "mean": np.nanmean,
         "median": np.nanmedian,
@@ -657,14 +690,17 @@ def estimate_thickness_from_all_points(
         "min": np.nanmin,
         "max": np.nanmax,
     }
-    if shape_length is not None and shape_length > 0:
-        default_metrics["percent"] = lambda x: float((len(x) * 100.0) / shape_length)
-
-    used = dict(default_metrics)
+    used: Dict[str, Callable[[ArrayNP], float]] = dict(default_metrics)
     if metrics:
         used.update(metrics)
 
-    summary = {name: float(func(values)) for name, func in used.items()}
+    summary: Dict[str, float] = {name: _safe(func, values) for name, func in used.items()}
+
+    if shape_length is not None and shape_length > 0:
+        # percent of columns with valid thickness among expected length
+        percent = (values.size * 100.0) / float(shape_length)
+        summary["percent"] = float(percent)
+
     return thickness_map, summary
 
 

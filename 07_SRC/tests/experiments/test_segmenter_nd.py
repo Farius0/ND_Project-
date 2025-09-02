@@ -24,7 +24,7 @@ def make_runner(segmenter_mode, processor_strategy, input_format="numpy", output
 
 if __name__ == "__main__":
       
-    root = Path.cwd().parent.parent / "03_EXAMPLES_DATA" / "Images"
+    root = Path.cwd().parent.parent.parent / "03_EXAMPLES_DATA" / "Images"
     images_path = sorted([str(p) for p in root.rglob("*.png")])
     rand = random.randint(0, len(images_path) - 2)
 

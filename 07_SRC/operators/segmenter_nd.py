@@ -650,12 +650,15 @@ class SegmenterND(OperatorCore):
         spatial_shape = tuple(x.shape[ax] for ax in spatial_axes) 
         if channel_axis is not None:    
             spatial_shape += (x.shape[channel_axis],) if not self.use_channels else ()
+        axes_to_remove = ()
         
         # === Move feature and/or channel to the end ===
         if self.use_channels and channel_axis is not None:
             x = np.moveaxis(x, channel_axis, -1)  # Move channel last
+            axes_to_remove += ("C",)
         if feature_axis is not None:
             x = np.moveaxis(x, feature_axis, -1)  # Move feature last
+            axes_to_remove += ("F",)
 
         # === Flatten for clustering ===
         if self.use_features and self.use_channels:
@@ -715,8 +718,14 @@ class SegmenterND(OperatorCore):
         # === Normalize output if requested ===
         if normalize_output:
             labels_ordered = labels_ordered.astype(np.float32, copy=False) / k
+            
+        result = torch.tensor(labels_ordered, device=image.device) if self.output_format == "torch" else labels_ordered
+        
+        # === Remove axes ===
+        tracker = self.track(image)
+        result = tracker.from_sliced(image, result, self, framework=self.framework, remove_axes=axes_to_remove)
 
-        return torch.tensor(labels_ordered, device=image.device) if self.output_format == "torch" else labels_ordered
+        return result
     
     # def kmeans_nd_torch(
     #     self,
@@ -1841,7 +1850,7 @@ def segmenter_nd(
                        "kmeans_k": num_classes, "use_channels": use_channels, "use_features": use_features, "seeds": seeds, "n_seeds": n_seeds}
     proc_params: Dict[str, Any] = {"processor_strategy": processor_strategy,}
     layout_params: Dict[str, Any] = {"layout_name": layout_name, "layout_framework": layout_framework, "layout_ensured_name": layout_ensured_name,}
-    global_params: Dict[str, Any] = {"framework": framework, "output_format": output_format}
+    global_params: Dict[str, Any] = {"framework": framework, "output_format": output_format, "normalize": False}
                  
     segments = SegmenterND( 
                            segmenter_cfg=SegmenterConfig(**segments_params),
