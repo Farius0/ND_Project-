@@ -273,10 +273,9 @@ def _mode_grid_noised(
     step_w = max(1, int(np.sqrt(max(1, W))))
 
     mask = _build_grid_mask_like(image, framework, step_h=step_h, step_w=step_w)
-    # Same policy as "replace": keep True, replace False with noise
-    return _mode_replace(image, mask, sigma, framework, seed=seed)
     
-
+    return apply_noise(image * mask, sigma, framework, seed=seed), mask
+    
 
 def apply_inpaint(
     image: ArrayLike,
