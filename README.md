@@ -34,7 +34,7 @@ source .venv/bin/activate
 ### 3. Install dependencies
 ```bash
 pip install -U pip
-pip install -r requirements/requirements.txt
+pip install -r 07_SRC/requirements/requirements.txt
 ```
 
 ### 4. Install project in editable mode
