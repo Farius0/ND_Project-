@@ -107,4 +107,8 @@ See the [`LICENSE`](LICENSE) file for details.
 ## Author
 
 Developed by **Farius Aina**  
-This project is part of the *Stage LC-OCT* research on skin imaging and segmentation.
+This project is part of the LC-OCT research on skin imaging and segmentation.
+
+---
+
+⭐ If you find this repository useful, feel free to star it.
